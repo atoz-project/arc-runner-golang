@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/atoz-project/arc-runner-golang
+
+jobs:
+  build-and-push:
+    # Public repo: GitHub-hosted runners are free here regardless of org billing.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          # Immutable per-build tag: YYYYMMDD + run number (e.g. 202609101).
+          echo "date_tag=$(date -u +%Y%m%d)${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.tags.outputs.date_tag }}
+          # Layer cache in the GitHub Actions cache backend. This matters: a cold
+          # pull of the actions-runner base image is slow, and mode=max lets later
+          # builds reuse every layer.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
