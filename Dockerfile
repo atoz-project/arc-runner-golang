@@ -22,6 +22,10 @@ ARG PROTOC_GEN_GO_VERSION=v1.36.10
 ARG PROTOC_GEN_CONNECT_GO_VERSION=v1.19.1
 # From https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/sha256.txt
 ARG BUF_SHA256=8720830e26a733da55bb89bcd3cb44849c0965fc0c44fb5d691cccdc64dca5af
+# goreleaser: 5 org repos share the goreleaser-action "~> v2" release convention
+# (issue #2). From the release's checksums.txt.
+ARG GORELEASER_VERSION=2.18.1
+ARG GORELEASER_SHA256=0c6122af0ad8fd65638889bf7d3757148b2f80eeff9f079682f0655df66ec8e8
 
 USER root
 
@@ -109,8 +113,8 @@ RUN curl -fsSL "https://github.com/sqlc-dev/sqlc/releases/download/v${SQLC_VERSI
     && tar -xzf /tmp/sqlc.tgz -C /usr/local/bin sqlc \
     && rm /tmp/sqlc.tgz
 
-# buf (proto codegen) and the GitHub CLI (repo automation scripts).
-# Both verified against checksums published on their releases.
+# buf (proto codegen), the GitHub CLI (repo automation scripts), and
+# goreleaser (org release convention). All sha256-verified against releases.
 RUN curl -fsSL -o /usr/local/bin/buf "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" \
     && echo "${BUF_SHA256}  /usr/local/bin/buf" | sha256sum -c - \
     && chmod +x /usr/local/bin/buf \
@@ -119,7 +123,11 @@ RUN curl -fsSL -o /usr/local/bin/buf "https://github.com/bufbuild/buf/releases/d
         | grep "linux_amd64.tar.gz" | (cd /tmp && sha256sum -c -) \
     && tar -xzf "/tmp/gh_${GH_VERSION}_linux_amd64.tar.gz" -C /tmp \
     && mv "/tmp/gh_${GH_VERSION}_linux_amd64/bin/gh" /usr/local/bin/gh \
-    && rm -rf "/tmp/gh_${GH_VERSION}_linux_amd64" "/tmp/gh_${GH_VERSION}_linux_amd64.tar.gz"
+    && rm -rf "/tmp/gh_${GH_VERSION}_linux_amd64" "/tmp/gh_${GH_VERSION}_linux_amd64.tar.gz" \
+    && curl -fsSL -o /tmp/gr.tgz "https://github.com/goreleaser/goreleaser/releases/download/v${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz" \
+    && echo "${GORELEASER_SHA256}  /tmp/gr.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/gr.tgz -C /usr/local/bin goreleaser \
+    && rm /tmp/gr.tgz
 
 # Home for the cache contract below; must be writable by the runner user even
 # when no PV is mounted (a PV mount simply shadows this directory).
@@ -132,6 +140,7 @@ RUN go version \
     && golangci-lint --version \
     && sqlc version \
     && buf --version \
+    && goreleaser --version \
     && protoc-gen-go --version \
     && protoc-gen-connect-go --version \
     && gh --version \

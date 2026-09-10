@@ -65,6 +65,7 @@ official minimal runner image for repos that have not opted in.
 | protoc-gen-go | `v1.36.10` | `go install`ed at image build; matches org repos |
 | protoc-gen-connect-go | `v1.19.1` | `go install`ed at image build; matches org repos |
 | gh | `2.100.0` | repo automation scripts; checksum-verified |
+| goreleaser | `2.18.1` | org release convention (5 repos); sha256-verified binary |
 | Tools | `git`, `make`, `gcc`, `libc6-dev`, `musl-tools`, `zstd`, `curl`, `ca-certificates`, `jq` | via apt; gcc+libc6-dev = CGO (mattn/go-sqlite3); zstd for cache compression |
 
 `GOPRIVATE=github.com/atoz-project/*` is set image-wide; authentication for
