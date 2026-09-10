@@ -6,6 +6,28 @@ runner image with the Go toolchain baked in. Built on top of the official
 
 Image: `ghcr.io/atoz-project/arc-runner-golang`
 
+## Using it in a workflow
+
+The live scale set `arc-runner-set-golang` (runner group `arc-public`) serves
+this image. Select it per job — the label *is* the image choice:
+
+```yaml
+jobs:
+  test:
+    runs-on: arc-runner-set-golang   # Go toolchain preinstalled
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.2"        # hits the baked-in toolcache, no download
+      - run: go test ./...
+```
+
+With the hostedtoolcache layout baked in, `setup-go` resolves instantly; plain
+`go` also works with no setup step at all. The default `arc-runner-set` keeps
+serving the official minimal runner image for repos that have not opted in.
+
+
 ## What's inside
 
 | Component | Version / source | Notes |
@@ -32,17 +54,22 @@ this layout, `setup-go` with `go-version: "1.26.2"` (or a `go.mod` declaring
 Go is also on `PATH` directly (`/opt/hostedtoolcache/go/1.26.2/x64/bin`), so
 jobs that skip `setup-go` still get `go` for free.
 
-## Using it in an ARC RunnerSet
+## The live scale set
+
+Deployed as `arc-runner-set-golang` in namespace `arc-runners` (k8s-sg-dev)
+via the `gha-runner-scale-set` chart 0.13.0. The effective spec:
 
 ```yaml
 apiVersion: actions.github.com/v1alpha1
 kind: AutoscalingRunnerSet
 metadata:
-  name: arc-runner-golang
+  name: arc-runner-set-golang
   namespace: arc-runners
 spec:
-  githubConfigUrl: https://github.com/<your-org>
-  githubConfigSecret: <your-secret>
+  githubConfigUrl: https://github.com/atoz-project
+  githubConfigSecret: github-config-secret
+  runnerGroup: arc-public
+  minRunners: 1
   template:
     spec:
       containers:
