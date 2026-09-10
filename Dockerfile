@@ -16,8 +16,9 @@ FROM ghcr.io/actions/actions-runner:2.337.0
 ARG GO_VERSIONS="1.25.14 1.26.8"
 ARG GO_SHA256_1_25_14=a21ae5633a269bcd7e90cf767e48225633795e99d831742cbf3397064fee7712
 ARG GO_SHA256_1_26_8=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
-# golangci-lint: pinned to what our CI uses (v1.x while .golangci.yml is v1-schema).
-ARG GOLANGCI_LINT_VERSION=1.64.8
+# golangci-lint: org standard is v2 schema (operator decision 2026-09-11,
+# docs/adr/0004). v1 is EOL upstream.
+ARG GOLANGCI_LINT_VERSION=2.13.2
 ARG SQLC_VERSION=1.31.1
 # sqlc publishes no checksums; this value was computed from the release tarball
 # (trust-on-first-use). A re-uploaded/tampered artifact fails the build loudly.
@@ -118,21 +119,19 @@ ENV CGO_ENABLED=1
 # root-owned files ever land in /home/runner/.cache (that tree belongs to the
 # runner user and, in ARC, to the cache PV).
 #
-# golangci-lint MUST be goinstall'd, not fetched via the official install
-# script: the prebuilt v1.64.8 binaries are compiled with go1.24 and
-# hard-refuse go1.26 module targets ("the Go language version (go1.24) used
-# to build golangci-lint is lower than the targeted Go version"). Compiling
-# it with this image's Go matches what our CI does today.
+# golangci-lint MUST be goinstall'd, not fetched as a prebuilt binary: release
+# binaries lag the current Go and hard-refuse newer module targets ("the Go
+# language version (goX) used to build golangci-lint is lower than the
+# targeted Go version"). Compiling with this image's Go matches what our CI
+# does. Note the /v2/ module path.
 RUN export GOBIN=/usr/local/bin GOPATH=/tmp/gopath GOMODCACHE=/tmp/gomodcache GOCACHE=/tmp/gocache \
-    && go install "github.com/golangci/golangci-lint/cmd/golangci-lint@v${GOLANGCI_LINT_VERSION}" \
+    && go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v${GOLANGCI_LINT_VERSION}" \
     && go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}" \
     && go install "connectrpc.com/connect/cmd/protoc-gen-connect-go@${PROTOC_GEN_CONNECT_GO_VERSION}" \
     && rm -rf /tmp/gopath /tmp/gomodcache /tmp/gocache
 
-# sqlc as a sha256-verified prebuilt binary, NOT `go install`: sqlc v1.31.1
-# requires go >= 1.26.0 to compile, which the 1.25 image line does not have
-# (and GOTOOLCHAIN=local forbids fetching one). The binary keeps both lines on
-# the exact same sqlc.
+# sqlc as a sha256-verified prebuilt binary, NOT `go install`: faster, and
+# checksum-pinned (TOFU note on ARG SQLC_SHA256 above).
 RUN curl -fsSL "https://github.com/sqlc-dev/sqlc/releases/download/v${SQLC_VERSION}/sqlc_${SQLC_VERSION}_linux_amd64.tar.gz" -o /tmp/sqlc.tgz \
     && echo "${SQLC_SHA256}  /tmp/sqlc.tgz" | sha256sum -c - \
     && tar -xzf /tmp/sqlc.tgz -C /usr/local/bin sqlc \

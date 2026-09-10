@@ -11,7 +11,7 @@ Image: `ghcr.io/atoz-project/arc-runner-golang`
 ## Tags
 
 The image is versioned independently of Go: one immutable SemVer tag per
-release (`:v1.0.0`, …), from the `VERSION` file at the repo root. Bumping
+release (`:v2.0.0`, …), from the `VERSION` file at the repo root. Bumping
 `VERSION` is part of the change it ships with — the build **fails loudly** if
 the tag already exists, so an immutable tag can never move. Matching git tags
 (`vX.Y.Z`) map every image back to its source commit.
@@ -69,7 +69,7 @@ win.
 |---|---|---|
 | GitHub Actions Runner | `2.337.0` (pinned base image) | [releases](https://github.com/actions/runner/releases) |
 | Go | `1.25.14` + `1.26.8` linux/amd64, both baked into the tool-cache | sha256-verified downloads from go.dev; a **cache, not a boundary** |
-| golangci-lint | `1.64.8` | **compiled from source with the image's Go** (`go install`) — see note below |
+| golangci-lint | `2.13.2` | **compiled from source with the image's Go** (`go install`, `/v2/` module path) — see note below; org lint standard is v2 schema ([ADR-0004](docs/adr/0004-golangci-lint-v2-org-standard.md)) |
 | sqlc | `1.31.1` | store layer codegen; prebuilt binary (sha256, TOFU) so both Go lines run identical sqlc — v1.31.1 needs go ≥ 1.26 to compile |
 | protoc-gen-go | `v1.36.10` | `go install`ed at image build; matches org repos |
 | protoc-gen-connect-go | `v1.19.1` | `go install`ed at image build; matches org repos |
@@ -80,12 +80,13 @@ win.
 `GOPRIVATE=github.com/atoz-project/*` is set image-wide; authentication for
 private module fetches comes from workflow secrets at job time.
 
-> **Why golangci-lint is goinstall'd, not a release binary:** the prebuilt
-> v1.64.8 binaries are compiled with go1.24 and hard-refuse go1.26 module
-> targets ("the Go language version (go1.24) used to build golangci-lint is
-> lower than the targeted Go version"). Compiling with this image's Go
-> matches what our CI does. The v1.x pin stays while `.golangci.yml` is
-> v1-schema; migrate config and binary together.
+> **Why golangci-lint is goinstall'd, not a release binary:** release binaries
+> lag the current Go and hard-refuse newer module targets ("the Go language
+> version (goX) used to build golangci-lint is lower than the targeted Go
+> version"). Compiling with this image's Go matches what our CI does. The org
+> lint standard is **v2 schema** (ADR-0004); migrate consumer configs with
+> `golangci-lint migrate`.
+
 
 ### Go pre-installed in the tool-cache layout
 
@@ -142,7 +143,7 @@ spec:
     spec:
       containers:
         - name: runner
-          image: ghcr.io/atoz-project/arc-runner-golang:v1.0.0   # pinned release — bump deliberately
+          image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0   # pinned release — bump deliberately
           command: ["/home/runner/run.sh"]
           volumeMounts:
             - name: go-cache
@@ -197,7 +198,7 @@ on cold start. Alibaba's
 without pulling layers. Contract:
 
 - **Immutable tags only.** ImageCache matches by exact `name:tag`; a floating
-  tag's snapshot silently goes stale. Use the release tag (`:v1.0.0`).
+  tag's snapshot silently goes stale. Use the release tag (`:v2.0.0`).
 - ECI auto-matches pods to an existing ImageCache by image name — no pod
   annotation needed.
 - The image is public, so no `imagePullSecrets` are required.
@@ -209,7 +210,7 @@ metadata:
   name: arc-runner-golang-1-0-0
 spec:
   images:
-    - ghcr.io/atoz-project/arc-runner-golang:v1.0.0
+    - ghcr.io/atoz-project/arc-runner-golang:v2.0.0
   imageCacheSize: 25
   retentionDays: 7
 ```
