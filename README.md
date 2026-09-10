@@ -61,8 +61,7 @@ official minimal runner image for repos that have not opted in.
 | GitHub Actions Runner | `2.337.0` (pinned base image) | [releases](https://github.com/actions/runner/releases) |
 | Go | `1.25.14` / `1.26.8` linux/amd64 (per line) | sha256-verified download from go.dev |
 | golangci-lint | `1.64.8` | **compiled from source with the image's Go** (`go install`) — see note below |
-| sqlc | `1.31.1` | store layer codegen |
-| buf | `1.72.0` | proto codegen (`make buf-generate`); sha256-verified |
+| sqlc | `1.31.1` | store layer codegen; prebuilt binary (sha256, TOFU) so both Go lines run identical sqlc — v1.31.1 needs go ≥ 1.26 to compile |
 | protoc-gen-go | `v1.36.10` | `go install`ed at image build; matches org repos |
 | protoc-gen-connect-go | `v1.19.1` | `go install`ed at image build; matches org repos |
 | gh | `2.100.0` | repo automation scripts; checksum-verified |

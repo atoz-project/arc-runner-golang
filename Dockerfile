@@ -12,6 +12,9 @@ ARG GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
 # golangci-lint: pinned to what our CI uses (v1.x while .golangci.yml is v1-schema).
 ARG GOLANGCI_LINT_VERSION=1.64.8
 ARG SQLC_VERSION=1.31.1
+# sqlc publishes no checksums; this value was computed from the release tarball
+# (trust-on-first-use). A re-uploaded/tampered artifact fails the build loudly.
+ARG SQLC_SHA256=497ae4fcdfa64c5b0c311ffe4c2bd991e43991e82e5367792ed78bc2dca27354
 ARG BUF_VERSION=1.72.0
 ARG GH_VERSION=2.100.0
 # protoc plugins are `go install`ed below; versions match what the org repos pin.
@@ -93,10 +96,18 @@ ENV GOTOOLCHAIN=local
 # it with this image's Go matches what our CI does today.
 RUN export GOBIN=/usr/local/bin GOPATH=/tmp/gopath GOMODCACHE=/tmp/gomodcache GOCACHE=/tmp/gocache \
     && go install "github.com/golangci/golangci-lint/cmd/golangci-lint@v${GOLANGCI_LINT_VERSION}" \
-    && go install "github.com/sqlc-dev/sqlc/cmd/sqlc@v${SQLC_VERSION}" \
     && go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}" \
     && go install "connectrpc.com/connect/cmd/protoc-gen-connect-go@${PROTOC_GEN_CONNECT_GO_VERSION}" \
     && rm -rf /tmp/gopath /tmp/gomodcache /tmp/gocache
+
+# sqlc as a sha256-verified prebuilt binary, NOT `go install`: sqlc v1.31.1
+# requires go >= 1.26.0 to compile, which the 1.25 image line does not have
+# (and GOTOOLCHAIN=local forbids fetching one). The binary keeps both lines on
+# the exact same sqlc.
+RUN curl -fsSL "https://github.com/sqlc-dev/sqlc/releases/download/v${SQLC_VERSION}/sqlc_${SQLC_VERSION}_linux_amd64.tar.gz" -o /tmp/sqlc.tgz \
+    && echo "${SQLC_SHA256}  /tmp/sqlc.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/sqlc.tgz -C /usr/local/bin sqlc \
+    && rm /tmp/sqlc.tgz
 
 # buf (proto codegen) and the GitHub CLI (repo automation scripts).
 # Both verified against checksums published on their releases.
