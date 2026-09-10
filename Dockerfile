@@ -1,14 +1,21 @@
-# Custom ARC (actions-runner-controller) runner image with the Go toolchain baked in.
+# Custom ARC (actions-runner-controller) runner image for Go CI: CGO toolchain,
+# pinned CLI tools, and the org's Go lines pre-baked as a download-avoidance
+# cache. Version SELECTION is delegated to actions/setup-go in each workflow
+# (see README "Using this image").
 #
 # Base: official GitHub Actions runner image, pinned to the latest stable release.
 # Check for updates: https://github.com/actions/runner/releases
 FROM ghcr.io/actions/actions-runner:2.337.0
 
-# GO_VERSION is a build argument so build.yml builds one image per version line
-# (see README "Version lines"). GO_SHA256 must match GO_VERSION:
-# https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz (from https://go.dev/dl/?mode=json).
-ARG GO_VERSION=1.26.8
-ARG GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+# GO_VERSIONS: space-separated patch versions baked into the hostedtoolcache.
+# The baked lines are a CACHE, not a boundary — setup-go still resolves and
+# downloads any version a workflow asks for; a baked line just makes that
+# resolution a zero-download local hit. The LAST version in the list is the
+# PATH default (keep the ENV PATH below in sync). SHA256s from
+# https://go.dev/dl/?mode=json&include=all — one GO_SHA256_<x_y_z> per entry.
+ARG GO_VERSIONS="1.25.14 1.26.8"
+ARG GO_SHA256_1_25_14=a21ae5633a269bcd7e90cf767e48225633795e99d831742cbf3397064fee7712
+ARG GO_SHA256_1_26_8=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
 # golangci-lint: pinned to what our CI uses (v1.x while .golangci.yml is v1-schema).
 ARG GOLANGCI_LINT_VERSION=1.64.8
 ARG SQLC_VERSION=1.31.1
@@ -56,27 +63,35 @@ RUN apt-get update \
 # faster scheduling). Build jobs that genuinely need Docker must keep running
 # on GitHub-hosted runners instead.
 
-# Pre-install Go into the GitHub "hostedtoolcache" layout:
+# Pre-install each GO_VERSIONS entry into the GitHub "hostedtoolcache" layout:
 #   ${RUNNER_TOOL_CACHE}/go/<version>/<arch>/            <- extracted distribution
 #   ${RUNNER_TOOL_CACHE}/go/<version>/<arch>.complete    <- empty completion marker
 # actions/setup-go (via @actions/tool-cache) only accepts a cached tool when BOTH
 # the directory and the sibling "<arch>.complete" marker file exist. With this
-# layout in place, setup-go (check-latest: false, the default) finds the image's
-# Go locally and skips the download entirely.
+# layout in place, setup-go (check-latest: false, the default) finds the baked
+# line locally and skips the download entirely; any other version falls through
+# to a normal download, so nothing breaks when the image lags a release.
 # Ref: https://github.com/actions/toolkit/blob/main/packages/tool-cache/src/tool-cache.ts
+# bash needed for ${!var} indirect expansion and ${v//./_} substitution.
+SHELL ["/bin/bash", "-c"]
 ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache
-ENV GO_TOOLCACHE_DIR=${RUNNER_TOOL_CACHE}/go/${GO_VERSION}/x64
 
-RUN curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" \
-    && echo "${GO_SHA256}  /tmp/go.tgz" | sha256sum -c - \
-    && mkdir -p "${GO_TOOLCACHE_DIR}" \
-    && tar -xzf /tmp/go.tgz -C "${GO_TOOLCACHE_DIR}" --strip-components=1 \
-    && touch "${GO_TOOLCACHE_DIR}.complete" \
-    && rm /tmp/go.tgz \
-    && chown -R runner:runner "${RUNNER_TOOL_CACHE}"
+RUN set -e; for v in ${GO_VERSIONS}; do \
+        var="GO_SHA256_${v//./_}"; sum="${!var}"; \
+        [ -n "${sum}" ] || { echo "missing GO_SHA256 for go${v}"; exit 1; }; \
+        curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${v}.linux-amd64.tar.gz"; \
+        echo "${sum}  /tmp/go.tgz" | sha256sum -c -; \
+        dir="${RUNNER_TOOL_CACHE}/go/${v}/x64"; \
+        mkdir -p "${dir}"; \
+        tar -xzf /tmp/go.tgz -C "${dir}" --strip-components=1; \
+        touch "${dir}.complete"; \
+    done; \
+    rm -f /tmp/go.tgz; \
+    chown -R runner:runner "${RUNNER_TOOL_CACHE}"
 
-# Go on PATH regardless of whether a workflow uses actions/setup-go.
-ENV PATH="${GO_TOOLCACHE_DIR}/bin:${PATH}"
+# Newest baked line on PATH (keep in sync with the last GO_VERSIONS entry) so
+# plain `go` works for workflows that don't use actions/setup-go.
+ENV PATH="${RUNNER_TOOL_CACHE}/go/1.26.8/x64/bin:${PATH}"
 
 # Cache persistence contract (see README): all Go caches point into
 # /home/runner/.cache so a persistent volume mounted there captures the

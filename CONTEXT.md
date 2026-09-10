@@ -6,14 +6,21 @@ reproducible Actions runner on our ARC/ECI cluster.
 ## Language
 
 **Version line**:
-One Go minor version (`1.25`, `1.26`), served by one floating image tag and
-one scale set. The image never carries two Go minors.
-_Avoid_: multi-version image, GO_VERSIONS
+One Go minor version (`1.25`, `1.26`) that org repos align on. A property of
+the *workflow* (`go-version:` in setup-go), not of the image: one image serves
+all lines. See ADR-0003.
+_Avoid_: line image, per-line scale set
+
+**Baked line**:
+A Go patch version pre-installed into the image's tool-cache as a
+download-avoidance cache. Baked lines are a cache, not a boundary: setup-go
+downloads any non-baked version at job time without failing.
+_Avoid_: pinned Go (pinning is the workflow's job, via go-version)
 
 **Scale set**:
-An ARC `AutoscalingRunnerSet`. Its name is the `runs-on` label, so the label
-*is* the image choice; there is no per-job image selection.
-_Avoid_: runner pool, fleet
+An ARC `AutoscalingRunnerSet`. Its name is the `runs-on` label. There is one
+scale set for Go CI; the label selects the *image*, never a Go version.
+_Avoid_: runner pool, fleet, per-line scale set
 
 **Tool-cache contract**:
 The hostedtoolcache layout (`/opt/hostedtoolcache/go/<version>/x64/` plus the

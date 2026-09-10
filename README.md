@@ -8,58 +8,58 @@ per-run.
 
 Image: `ghcr.io/atoz-project/arc-runner-golang`
 
-## Version lines and tags
+## Tags
 
-One image per Go minor version line, built from a matrix. Tags:
+One tag per build: `:<date>.<run>` (e.g. `:20260910.42`) — immutable, never
+reused. There are deliberately **no floating tags** (`:latest`, `:1.25`):
+the scale set pins a date tag and bumps deliberately, so "what is running" is
+never time-dependent, and ECI ImageCache (which matches pods by exact
+`name:tag`) can never serve a stale snapshot.
 
-| Tag | Moves? | Meaning |
-|---|---|---|
-| `:1.25`, `:1.26` | yes, per patch release | floating minor line — what scale sets should consume |
-| `:<go>-<date><run>` (e.g. `:1.26.8-202609101`) | never | immutable build, for pinned rollouts and ECI ImageCache |
-
-There is deliberately **no `:latest` tag**: consumers pin an explicit line (or
-date tag) so "what is running" is never time-dependent.
-
-Scale set ↔ line mapping: `arc-runner-set-golang` tracks the **1.25** line
-(the org's declared `go` directive); `arc-runner-set-golang-1.26` tracks the
-**1.26** line for repos opting into the newer toolchain. Bumping a patch
-version is a one-row edit in [build.yml](.github/workflows/build.yml); adding
-a line (e.g. 1.27) is one more matrix row plus one more scale set.
+The image carries no version identity on purpose: Go version selection is the
+workflow's job (below), not the tag's. See
+[docs/adr/0003](docs/adr/0003-version-selection-delegated-to-setup-go.md).
 
 ## Using it in a workflow
 
-Select the scale set per job — the label *is* the image choice:
+The contract is stock GitHub — nothing org-specific:
 
 ```yaml
 jobs:
   test:
-    runs-on: arc-runner-set-golang   # Go 1.25.x preinstalled
+    runs-on: arc-runner-set-golang
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
         with:
-          go-version: "1.25"          # hits the baked-in toolcache, no download
+          go-version: "1.25"   # explicit minor spec; baked lines resolve with zero download
+          cache: true          # module/build cache via the Actions cache backend (works on ARC)
+    # or: go-version-file: go.mod
       - run: go test ./...
 ```
 
-Pin `go-version` to the line your scale set tracks. With the hostedtoolcache
-layout baked in, `setup-go` resolves instantly; plain `go` also works with no
-setup step at all. `GOTOOLCHAIN=auto` is set image-wide: if a repo's
-`go.mod`/`toolchain` directive demands a Go newer than the image, the job
-downloads that toolchain at run time (slower, but self-healing) instead of
-failing — repos that want strict pinning can set `GOTOOLCHAIN=local` per job.
-The default `arc-runner-set` keeps serving the official minimal runner image for repos that have not opted in.
+`go-version` is the single source of truth for the Go version, exactly as on
+GitHub-hosted runners (so this doubles as the overflow/DR path). The org's
+aligned lines (`1.25`, `1.26`) are **baked into the image's tool-cache** as a
+download-avoidance cache: matching specs resolve locally with no download;
+anything else setup-go downloads at job time — slower, never an error.
+`GOTOOLCHAIN=auto` is set image-wide for the same reason: a `go.mod`
+`toolchain` directive newer than the selected Go downloads that toolchain
+(sumdb-verified) instead of failing; set `GOTOOLCHAIN=local` per job if you
+want strictness. CGO is on by default image-wide (`CGO_ENABLED=1`, gcc +
+libc6-dev installed); per-command overrides (`CGO_ENABLED=0 go build`) still
+win.
 
-> The scale set must exist with **exactly** that name and be configured to use
-> this image (see below). `runs-on` is just a label match — it does not pick
-> the image by itself.
+> The scale set must exist with **exactly** the name `arc-runner-set-golang`
+> and be configured to use this image (see below). `runs-on` is just a label
+> match — it does not pick the image by itself.
 
 ## What's inside
 
 | Component | Version | Notes |
 |---|---|---|
 | GitHub Actions Runner | `2.337.0` (pinned base image) | [releases](https://github.com/actions/runner/releases) |
-| Go | `1.25.14` / `1.26.8` linux/amd64 (per line) | sha256-verified download from go.dev |
+| Go | `1.25.14` + `1.26.8` linux/amd64, both baked into the tool-cache | sha256-verified downloads from go.dev; a **cache, not a boundary** |
 | golangci-lint | `1.64.8` | **compiled from source with the image's Go** (`go install`) — see note below |
 | sqlc | `1.31.1` | store layer codegen; prebuilt binary (sha256, TOFU) so both Go lines run identical sqlc — v1.31.1 needs go ≥ 1.26 to compile |
 | protoc-gen-go | `v1.36.10` | `go install`ed at image build; matches org repos |
@@ -80,7 +80,7 @@ private module fetches comes from workflow secrets at job time.
 
 ### Go pre-installed in the tool-cache layout
 
-Go is extracted into the GitHub hostedtoolcache layout:
+Both baked Go lines live side by side in the GitHub hostedtoolcache layout:
 
 ```
 /opt/hostedtoolcache/go/<version>/x64/          # the Go distribution (bin/, pkg/, ...)
@@ -90,9 +90,11 @@ Go is extracted into the GitHub hostedtoolcache layout:
 `actions/setup-go` (through `@actions/tool-cache`) only accepts a cached tool
 when both the directory and the sibling `<arch>.complete` marker exist. With
 this layout, `setup-go` with a matching `go-version` hits the cache and
-**skips the download entirely** (`check-latest: false`, the default).
+**skips the download entirely** (`check-latest: false`, the default); any
+other version downloads normally.
 
-Go is also on `PATH` directly, so jobs that skip `setup-go` still get `go`.
+The newest baked line is on `PATH` directly, so jobs that skip `setup-go`
+still get a working `go`.
 
 ### Cache persistence contract
 
@@ -131,7 +133,7 @@ spec:
     spec:
       containers:
         - name: runner
-          image: ghcr.io/atoz-project/arc-runner-golang:1.25   # explicit line tag, or a date tag for pinned rollouts
+          image: ghcr.io/atoz-project/arc-runner-golang:20260910.42   # pinned date tag — bump deliberately
           command: ["/home/runner/run.sh"]
           volumeMounts:
             - name: go-cache
@@ -186,7 +188,7 @@ on cold start. Alibaba's
 without pulling layers. Contract:
 
 - **Immutable tags only.** ImageCache matches by exact `name:tag`; a floating
-  tag's snapshot silently goes stale. Use the date tag (`:1.26.8-202609101`).
+  tag's snapshot silently goes stale. Use the date tag (`:20260910.42`).
 - ECI auto-matches pods to an existing ImageCache by image name — no pod
   annotation needed.
 - The image is public, so no `imagePullSecrets` are required.
@@ -195,10 +197,10 @@ without pulling layers. Contract:
 apiVersion: eci.alibabacloud.com/v1
 kind: ImageCache
 metadata:
-  name: arc-runner-golang-1-26-8
+  name: arc-runner-golang-20260910-42
 spec:
   images:
-    - ghcr.io/atoz-project/arc-runner-golang:1.26.8-202609101
+    - ghcr.io/atoz-project/arc-runner-golang:20260910.42
   imageCacheSize: 25
   retentionDays: 7
 ```
@@ -276,8 +278,8 @@ kubernetes` on the scale set, which is not enabled.
 
 The image is built and pushed by
 [.github/workflows/build.yml](.github/workflows/build.yml) on every push to
-`main`, on any tag, and on manual dispatch — one matrix leg per Go version
-line. Layers are cached with `type=gha,mode=max`, scoped per line.
+`main`, on any tag, and on manual dispatch. Layers are cached with
+`type=gha,mode=max`.
 
 ## License
 
