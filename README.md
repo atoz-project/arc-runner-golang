@@ -10,14 +10,23 @@ Image: `ghcr.io/atoz-project/arc-runner-golang`
 
 ## Tags
 
-One tag per build: `:<date>.<run>` (e.g. `:20260910.42`) — immutable, never
-reused. There are deliberately **no floating tags** (`:latest`, `:1.25`):
-the scale set pins a date tag and bumps deliberately, so "what is running" is
-never time-dependent, and ECI ImageCache (which matches pods by exact
-`name:tag`) can never serve a stale snapshot.
+The image is versioned independently of Go: one immutable SemVer tag per
+release (`:v1.0.0`, …), from the `VERSION` file at the repo root. Bumping
+`VERSION` is part of the change it ships with — the build **fails loudly** if
+the tag already exists, so an immutable tag can never move. Matching git tags
+(`vX.Y.Z`) map every image back to its source commit.
 
-The image carries no version identity on purpose: Go version selection is the
-workflow's job (below), not the tag's. See
+Bump rules: **major** = consumer-visible contract break (ENV/contract changes,
+tool removal); **minor** = tool added or version-bumped, new baked Go line;
+**patch** = base-image refresh, doc-only fixes.
+
+There are deliberately **no floating tags** (`:latest`): the scale set pins a
+`:vX.Y.Z` and bumps deliberately, so "what is running" is never
+time-dependent, and ECI ImageCache (which matches pods by exact `name:tag`)
+can never serve a stale snapshot.
+
+The image carries no Go-version identity on purpose: Go version selection is
+the workflow's job (below), not the tag's. See
 [docs/adr/0003](docs/adr/0003-version-selection-delegated-to-setup-go.md).
 
 ## Using it in a workflow
@@ -133,7 +142,7 @@ spec:
     spec:
       containers:
         - name: runner
-          image: ghcr.io/atoz-project/arc-runner-golang:20260910.42   # pinned date tag — bump deliberately
+          image: ghcr.io/atoz-project/arc-runner-golang:v1.0.0   # pinned release — bump deliberately
           command: ["/home/runner/run.sh"]
           volumeMounts:
             - name: go-cache
@@ -188,7 +197,7 @@ on cold start. Alibaba's
 without pulling layers. Contract:
 
 - **Immutable tags only.** ImageCache matches by exact `name:tag`; a floating
-  tag's snapshot silently goes stale. Use the date tag (`:20260910.42`).
+  tag's snapshot silently goes stale. Use the release tag (`:v1.0.0`).
 - ECI auto-matches pods to an existing ImageCache by image name — no pod
   annotation needed.
 - The image is public, so no `imagePullSecrets` are required.
@@ -197,10 +206,10 @@ without pulling layers. Contract:
 apiVersion: eci.alibabacloud.com/v1
 kind: ImageCache
 metadata:
-  name: arc-runner-golang-20260910-42
+  name: arc-runner-golang-1-0-0
 spec:
   images:
-    - ghcr.io/atoz-project/arc-runner-golang:20260910.42
+    - ghcr.io/atoz-project/arc-runner-golang:v1.0.0
   imageCacheSize: 25
   retentionDays: 7
 ```

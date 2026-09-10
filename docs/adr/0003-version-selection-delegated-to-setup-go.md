@@ -37,8 +37,12 @@ Status: accepted (2026-09-10, human decision)
 
 - One scale set (`arc-runner-set-golang`) serves all lines; the
   versioned-scale-set naming question dissolves.
-- Floating line tags (`:1.25`, `:1.26`) and `:latest` are retired; the image
-  ships immutable date tags only, and the scale set pins a date tag.
+- Floating line tags (`:1.25`, `:1.26`) and `:latest` are retired. The image
+  ships immutable **SemVer** tags (`:vX.Y.Z` from the `VERSION` file, with a
+  build-time overwrite guard); the scale set pins a version and bumps
+  deliberately. (An interim date-tag scheme lasted hours and was never
+  consumed by anyone but the scale set itself.)
+
 - Consumer contract: `runs-on: arc-runner-set-golang` + `setup-go@v7` with
   explicit `go-version` + `cache: true`. Works identically on GitHub-hosted
   runners, so it doubles as the overflow/DR path.

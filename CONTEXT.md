@@ -22,6 +22,12 @@ An ARC `AutoscalingRunnerSet`. Its name is the `runs-on` label. There is one
 scale set for Go CI; the label selects the *image*, never a Go version.
 _Avoid_: runner pool, fleet, per-line scale set
 
+**Image version**:
+The image's own SemVer (`vX.Y.Z` from the `VERSION` file), independent of any
+Go version inside it. Immutable tags, bumped deliberately with each change;
+git tag `vX.Y.Z` maps source to image.
+_Avoid_: date tag, latest
+
 **Tool-cache contract**:
 The hostedtoolcache layout (`/opt/hostedtoolcache/go/<version>/x64/` plus the
 sibling `x64.complete` marker) that makes `actions/setup-go` resolve locally
