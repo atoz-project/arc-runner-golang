@@ -85,9 +85,12 @@ ENV GOPATH=/home/runner/.cache/go \
     GOCACHE=/home/runner/.cache/go-build
 # Private org modules: skip the public proxy/sumdb; auth is injected by workflow secrets.
 ENV GOPRIVATE=github.com/atoz-project/*
-# Fail loudly ("upgrade the image") instead of silently downloading a newer
-# toolchain when go.mod's toolchain directive is newer than this image's Go.
-ENV GOTOOLCHAIN=local
+# GOTOOLCHAIN=auto (human decision, 2026-09-10): a repo whose go.mod/toolchain
+# directive is newer than this image's Go downloads that toolchain at job time
+# (sumdb-verified) instead of failing. Self-healing beats fail-loud here: the
+# consumer-CI blockage cost outweighed the "bump the image" signal. Repos that
+# want strictness can set GOTOOLCHAIN=local per job. See docs/adr/0002.
+ENV GOTOOLCHAIN=auto
 
 # Go-based CLIs via `go install` with throwaway build caches in /tmp, so no
 # root-owned files ever land in /home/runner/.cache (that tree belongs to the

@@ -44,11 +44,11 @@ jobs:
 
 Pin `go-version` to the line your scale set tracks. With the hostedtoolcache
 layout baked in, `setup-go` resolves instantly; plain `go` also works with no
-setup step at all. `GOTOOLCHAIN=local` is set image-wide: if a repo's
+setup step at all. `GOTOOLCHAIN=auto` is set image-wide: if a repo's
 `go.mod`/`toolchain` directive demands a Go newer than the image, the job
-fails loudly instead of silently downloading a toolchain — that failure means
-"bump the image line". The default `arc-runner-set` keeps serving the
-official minimal runner image for repos that have not opted in.
+downloads that toolchain at run time (slower, but self-healing) instead of
+failing — repos that want strict pinning can set `GOTOOLCHAIN=local` per job.
+The default `arc-runner-set` keeps serving the official minimal runner image for repos that have not opted in.
 
 > The scale set must exist with **exactly** that name and be configured to use
 > this image (see below). `runs-on` is just a label match — it does not pick
