@@ -30,14 +30,16 @@ ARG GORELEASER_SHA256=0c6122af0ad8fd65638889bf7d3757148b2f80eeff9f079682f0655df6
 USER root
 
 # Toolchain and CI utilities. Keep this list minimal on purpose.
-# libc6-dev: C library headers — gcc alone cannot compile cgo (the race
-# detector and cgo builds need them). zstd: cache compression. musl-tools:
-# static linking targets (same precedent as the rust image).
+# gcc + libc6-dev: the CGO toolchain (mattn/go-sqlite3). Both are required —
+# gcc without libc6-dev can't compile, and WITHOUT gcc Go silently defaults
+# CGO_ENABLED=0, which compiles cgo packages as stubs (the 2026-09-10 cellar
+# incident). zstd: cache compression. musl-tools: static linking targets.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         libc6-dev \
+        gcc \
         git \
         jq \
         make \
@@ -91,6 +93,11 @@ ENV GOPRIVATE=github.com/atoz-project/*
 # consumer-CI blockage cost outweighed the "bump the image" signal. Repos that
 # want strictness can set GOTOOLCHAIN=local per job. See docs/adr/0002.
 ENV GOTOOLCHAIN=auto
+# CGO is a first-class contract of this image (gcc + libc6-dev above). Pin the
+# default ON so a missing/broken C toolchain fails builds loudly instead of
+# silently compiling cgo packages as stubs. Per-command overrides
+# (CGO_ENABLED=0 go build for cross-compile) still win over the ENV.
+ENV CGO_ENABLED=1
 
 # Go-based CLIs via `go install` with throwaway build caches in /tmp, so no
 # root-owned files ever land in /home/runner/.cache (that tree belongs to the
@@ -148,3 +155,9 @@ RUN go version \
     && protoc-gen-connect-go --version \
     && gh --version \
     && zstd --version
+
+# CGO smoke check: actually compile a cgo program. This is the regression test
+# for the missing-gcc incident — version banners alone did not catch it.
+RUN printf 'package main\nimport "C"\nfunc main() {}\n' > /tmp/cgo_smoke.go \
+    && go build -o /tmp/cgo_smoke /tmp/cgo_smoke.go \
+    && rm -f /tmp/cgo_smoke /tmp/cgo_smoke.go
