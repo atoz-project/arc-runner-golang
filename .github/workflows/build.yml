@@ -3,6 +3,9 @@ name: build
 on:
   push:
     branches: [main]
+    # Only image-affecting changes build. Docs/workflow-only commits would
+    # fail the tag-overwrite guard (VERSION unchanged) for no benefit.
+    paths: ["Dockerfile", "VERSION", ".github/workflows/build.yml"]
   workflow_dispatch:
 
 # contents: write — the workflow pushes a git tag matching the image version.

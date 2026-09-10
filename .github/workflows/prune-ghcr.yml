@@ -1,0 +1,55 @@
+name: prune-ghcr
+
+# Manual GHCR cleanup: deletes every package version that does NOT carry the
+# current release tag (v$(cat VERSION)). Dry-run by default; dispatch with
+# really_delete=true to actually delete. Also doubles as the retention tool:
+# re-dispatch after future cleanups.
+on:
+  workflow_dispatch:
+    inputs:
+      really_delete:
+        description: "Actually delete (false = dry-run plan only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          KEEP="v$(cat VERSION)"
+          echo "keeping any version tagged $KEEP"
+          gh api --paginate "/orgs/atoz-project/packages/container/arc-runner-golang/versions" \
+            --jq '.[] | [.id, (.metadata.container.tags | join(","))] | @tsv' > /tmp/versions.tsv
+          : > /tmp/delete.txt
+          while IFS=$'\t' read -r id tags; do
+            if [[ ",$tags," == *",$KEEP,"* ]]; then
+              echo "KEEP    $id ($tags)"
+            else
+              echo "DELETE  $id ($tags)"
+              echo "$id" >> /tmp/delete.txt
+            fi
+          done < /tmp/versions.tsv
+          echo "count=$(wc -l < /tmp/delete.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Delete
+        if: inputs.really_delete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          while read -r id; do
+            echo "deleting version $id"
+            gh api -X DELETE "/orgs/atoz-project/packages/container/arc-runner-golang/versions/$id"
+          done < /tmp/delete.txt
