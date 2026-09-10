@@ -126,10 +126,10 @@ to the GitHub cache service becomes redundant.
 ## The live scale set
 
 Deployed as `arc-runner-set-golang` in namespace `arc-runners` (k8s-sg-dev)
-via the `gha-runner-scale-set` chart 0.13.0.
+via the `gha-runner-scale-set` chart 0.14.2.
 The deployed values are the source of truth in
 [deploy/arc-runner-set-golang.values.yaml](deploy/arc-runner-set-golang.values.yaml)
-— apply with `helm upgrade ... --version 0.13.0 -f deploy/…` (chart minor must
+— apply with `helm upgrade ... --version 0.14.2 -f deploy/…` (chart minor must
 match the controller; see the file header for the incident rules). The
 rendered spec for reference:
 

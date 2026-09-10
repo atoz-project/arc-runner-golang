@@ -3,11 +3,12 @@
 # THIS FILE IS THE SOURCE OF TRUTH. Apply changes with:
 #   helm upgrade arc-runner-set-golang \
 #     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-#     --version 0.13.0 -n arc-runners -f deploy/arc-runner-set-golang.values.yaml
+#     --version 0.14.2 -n arc-runners -f deploy/arc-runner-set-golang.values.yaml
 #
 # Rules learned the hard way (2026-09-10/11 incidents):
 # - --version MUST be pinned and MUST match the controller's minor (controller
-#   is 0.13.0; chart 0.14.2 against it silently orphaned the listener).
+#   is 0.14.2; a 0.14.x chart against controller 0.13.0 silently orphaned the
+#   listener — 2026-09-11 incident).
 # - Never upgrade with a stale copy of this file: helm replaces the whole
 #   rendered spec, so any drift between this file and the live CR is reverted.
 # - `image:` must point at an existing immutable tag. Rolling back to a values
