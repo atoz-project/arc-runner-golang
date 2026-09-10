@@ -36,6 +36,11 @@ jobs:
           while IFS=$'\t' read -r id tags; do
             if [[ ",$tags," == *",$KEEP,"* ]]; then
               echo "KEEP    $id ($tags)"
+            elif [[ -z "$tags" ]]; then
+              # Untagged rows are per-arch/attestation child manifests of the
+              # multi-arch index — deleting one can orphan a LIVE tagged
+              # image. Leave them alone.
+              echo "SKIP    $id (untagged child manifest)"
             else
               echo "DELETE  $id ($tags)"
               echo "$id" >> /tmp/delete.txt
