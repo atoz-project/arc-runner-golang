@@ -8,26 +8,47 @@ per-run.
 
 Image: `ghcr.io/atoz-project/arc-runner-golang`
 
+## Version lines and tags
+
+One image per Go minor version line, built from a matrix. Tags:
+
+| Tag | Moves? | Meaning |
+|---|---|---|
+| `:1.25`, `:1.26` | yes, per patch release | floating minor line — what scale sets should consume |
+| `:<go>-<date><run>` (e.g. `:1.26.8-202609101`) | never | immutable build, for pinned rollouts and ECI ImageCache |
+
+There is deliberately **no `:latest` tag**: consumers pin an explicit line (or
+date tag) so "what is running" is never time-dependent.
+
+Scale set ↔ line mapping: `arc-runner-set-golang` tracks the **1.25** line
+(the org's declared `go` directive); `arc-runner-set-golang-1.26` tracks the
+**1.26** line for repos opting into the newer toolchain. Bumping a patch
+version is a one-row edit in [build.yml](.github/workflows/build.yml); adding
+a line (e.g. 1.27) is one more matrix row plus one more scale set.
+
 ## Using it in a workflow
 
-The live scale set `arc-runner-set-golang` (runner group `arc-public`) serves
-this image. Select it per job — the label *is* the image choice:
+Select the scale set per job — the label *is* the image choice:
 
 ```yaml
 jobs:
   test:
-    runs-on: arc-runner-set-golang   # Go toolchain preinstalled
+    runs-on: arc-runner-set-golang   # Go 1.25.x preinstalled
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26.2"        # hits the baked-in toolcache, no download
+          go-version: "1.25"          # hits the baked-in toolcache, no download
       - run: go test ./...
 ```
 
-With the hostedtoolcache layout baked in, `setup-go` resolves instantly; plain
-`go` also works with no setup step at all. The default `arc-runner-set` keeps
-serving the official minimal runner image for repos that have not opted in.
+Pin `go-version` to the line your scale set tracks. With the hostedtoolcache
+layout baked in, `setup-go` resolves instantly; plain `go` also works with no
+setup step at all. `GOTOOLCHAIN=local` is set image-wide: if a repo's
+`go.mod`/`toolchain` directive demands a Go newer than the image, the job
+fails loudly instead of silently downloading a toolchain — that failure means
+"bump the image line". The default `arc-runner-set` keeps serving the
+official minimal runner image for repos that have not opted in.
 
 > The scale set must exist with **exactly** that name and be configured to use
 > this image (see below). `runs-on` is just a label match — it does not pick
@@ -38,17 +59,22 @@ serving the official minimal runner image for repos that have not opted in.
 | Component | Version | Notes |
 |---|---|---|
 | GitHub Actions Runner | `2.337.0` (pinned base image) | [releases](https://github.com/actions/runner/releases) |
-| Go | `1.26.2` linux/amd64 | sha256-verified download from go.dev |
-| golangci-lint | `1.64.8` | **compiled from source with Go 1.26.2** (`go install`) — see note below |
+| Go | `1.25.14` / `1.26.8` linux/amd64 (per line) | sha256-verified download from go.dev |
+| golangci-lint | `1.64.8` | **compiled from source with the image's Go** (`go install`) — see note below |
 | sqlc | `1.31.1` | store layer codegen |
-| buf | `1.72.0` | proto codegen (`make buf-generate`) |
+| buf | `1.72.0` | proto codegen (`make buf-generate`); sha256-verified |
+| protoc-gen-go | `v1.36.10` | `go install`ed at image build; matches org repos |
+| protoc-gen-connect-go | `v1.19.1` | `go install`ed at image build; matches org repos |
 | gh | `2.100.0` | repo automation scripts; checksum-verified |
-| Tools | `git`, `make`, `gcc`, `curl`, `ca-certificates`, `jq`, `zstd` | via apt; zstd for cache-server compression |
+| Tools | `git`, `make`, `gcc`, `libc6-dev`, `musl-tools`, `zstd`, `curl`, `ca-certificates`, `jq` | via apt; gcc+libc6-dev = CGO (mattn/go-sqlite3); zstd for cache compression |
+
+`GOPRIVATE=github.com/atoz-project/*` is set image-wide; authentication for
+private module fetches comes from workflow secrets at job time.
 
 > **Why golangci-lint is goinstall'd, not a release binary:** the prebuilt
 > v1.64.8 binaries are compiled with go1.24 and hard-refuse go1.26 module
 > targets ("the Go language version (go1.24) used to build golangci-lint is
-> lower than the targeted Go version"). Compiling with this image's Go 1.26.2
+> lower than the targeted Go version"). Compiling with this image's Go
 > matches what our CI does. The v1.x pin stays while `.golangci.yml` is
 > v1-schema; migrate config and binary together.
 
@@ -57,15 +83,14 @@ serving the official minimal runner image for repos that have not opted in.
 Go is extracted into the GitHub hostedtoolcache layout:
 
 ```
-/opt/hostedtoolcache/go/1.26.2/x64/          # the Go distribution (bin/, pkg/, ...)
-/opt/hostedtoolcache/go/1.26.2/x64.complete  # empty completion marker
+/opt/hostedtoolcache/go/<version>/x64/          # the Go distribution (bin/, pkg/, ...)
+/opt/hostedtoolcache/go/<version>/x64.complete  # empty completion marker
 ```
 
 `actions/setup-go` (through `@actions/tool-cache`) only accepts a cached tool
 when both the directory and the sibling `<arch>.complete` marker exist. With
-this layout, `setup-go` with `go-version: "1.26.2"` (or a `go.mod` declaring
-`go 1.26.2`) hits the cache and **skips the download entirely**
-(`check-latest: false`, the default).
+this layout, `setup-go` with a matching `go-version` hits the cache and
+**skips the download entirely** (`check-latest: false`, the default).
 
 Go is also on `PATH` directly, so jobs that skip `setup-go` still get `go`.
 
@@ -81,7 +106,10 @@ GOCACHE=/home/runner/.cache/go-build
 
 so **a persistent volume mounted at `/home/runner/.cache` captures
 everything** — module cache, build cache, GOPATH — and survives runner pod
-churn. See the cache PV section below.
+churn. golangci-lint's cache (`~/.cache/golangci-lint`) rides along for free.
+See the cache PV section below. Once the PV is proven warm, set
+`cache: false` on `setup-go` in your workflows — its save/restore round-trip
+to the GitHub cache service becomes redundant.
 
 ## The live scale set
 
@@ -103,7 +131,7 @@ spec:
     spec:
       containers:
         - name: runner
-          image: ghcr.io/atoz-project/arc-runner-golang:latest   # pin the date tag for reviewable rollouts
+          image: ghcr.io/atoz-project/arc-runner-golang:1.25   # explicit line tag, or a date tag for pinned rollouts
           command: ["/home/runner/run.sh"]
           volumeMounts:
             - name: go-cache
@@ -114,9 +142,8 @@ spec:
             claimName: arc-golang-cache        # pre-created, see below
 ```
 
-For a reviewable, pinned rollout, use the date tag (e.g.
-`ghcr.io/atoz-project/arc-runner-golang:202609101`, format `YYYYMMDD` + build
-run number) instead of `latest`.
+Note the pod spec should also set `securityContext.fsGroup: 1001` (the runner
+uid) so the mounted cache volume is writable.
 
 ### Cache PV
 
@@ -145,11 +172,50 @@ If your cluster has no RWX provisioner, use `ReadWriteOnce` with
 entirely — the ENV contract still keeps caches in one place within a pod's
 lifetime).
 
+The cache is shared, writable CI state: module contents are still verified
+against each repo's `go.sum`, and the build cache is content-addressed, but
+treat the volume as within the trust boundary of every workflow that runs on
+the scale set.
+
+## ECI ImageCache
+
+Our cluster (k8s-sg-dev) is pure ECI: every runner pod pays a full image pull
+on cold start. Alibaba's
+[ImageCache](https://www.alibabacloud.com/help/en/elastic-container-instance/latest/imagecaches-overview)
+(`imagecaches.eci.alibabacloud.com`) snapshots an image so ECI pods start
+without pulling layers. Contract:
+
+- **Immutable tags only.** ImageCache matches by exact `name:tag`; a floating
+  tag's snapshot silently goes stale. Use the date tag (`:1.26.8-202609101`).
+- ECI auto-matches pods to an existing ImageCache by image name — no pod
+  annotation needed.
+- The image is public, so no `imagePullSecrets` are required.
+
+```yaml
+apiVersion: eci.alibabacloud.com/v1
+kind: ImageCache
+metadata:
+  name: arc-runner-golang-1-26-8
+spec:
+  images:
+    - ghcr.io/atoz-project/arc-runner-golang:1.26.8-202609101
+  imageCacheSize: 25
+  retentionDays: 7
+```
+
+Not wired yet: creating/updating the CR per build needs cluster credentials
+the build workflow does not have. Follow-up is either a build.yml step with a
+cluster kubeconfig secret, or a small in-cluster cron that reconciles the
+newest date tag. Scale sets must also reference a date tag for this to take
+effect.
+
 ## Integration tests (postgres service container)
 
-ARC's kubernetes container mode supports job service containers. Our DB tests
-need postgres **with `pg_trgm`** (and pgvector), so use the pgvector image —
-it ships the full contrib set:
+Job service containers require `containerMode: kubernetes` on the scale set,
+which is **not enabled** on ours — as written this section only applies once
+that mode is turned on. With it, DB tests that need postgres **with
+`pg_trgm`** (and pgvector) should use the pgvector image — it ships the full
+contrib set:
 
 ```yaml
 jobs:
@@ -180,52 +246,38 @@ Extensions are not created automatically. Two options:
    `/docker-entrypoint-initdb.d/00-extensions.sql` onto `pgvector/pgvector:pg16`.
    Only worth it if option 1 becomes unmaintainable.
 
-## Self-hosted Actions cache server
+## Self-hosted Actions cache server — not adopted
 
-To use a self-hosted implementation of the GitHub Actions cache service
-(such as [falcondev-oss/github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server)),
-point runners at it via environment variables on the runner container:
-
-```yaml
-          env:
-            - name: ACTIONS_CACHE_URL
-              value: "http://cache.example.internal/"
-            - name: ACTIONS_RESULTS_URL
-              value: "http://cache.example.internal/"
-```
-
-Replace the URL with wherever your cache server lives. `zstd` is preinstalled
-for cache compression.
-
-> **Pending decision — `ACTIONS_RESULTS_URL` gets overwritten by the stock
-> runner.** The upstream `actions/runner` binary overwrites
-> `ACTIONS_RESULTS_URL` at runtime with the GitHub-hosted value, so the env
-> above is only half-effective with the stock base image. Options:
->
-> 1. **Recommended: rebase this image** `FROM ghcr.io/falcondev-oss/actions-runner:2.337.0`
->    (their fork tracks upstream versions and honors
->    `CUSTOM_ACTIONS_RESULTS_URL` natively).
-> 2. Binary-patch the stock runner in this Dockerfile.
->
-> Not done yet — flagged here so the decision is recorded next to the config
-> that depends on it.
+We do not run one (e.g. falcondev-oss/github-actions-cache-server). Verified
+against upstream docs: the stock runner **overwrites `ACTIONS_RESULTS_URL` at
+runtime**, so merely setting `ACTIONS_CACHE_URL`/`ACTIONS_RESULTS_URL` env on
+the runner container does nothing — working setups require a binary patch to
+`Runner.Worker.dll` or the vendor's forked runner base image. We decline both
+(supply chain vs. fragile patch), because the Go caching problem is already
+solved by the persistent volume above. `ACTIONS_CACHE_URL` is additionally the
+legacy v1 endpoint and ignored by the v2 cache protocol. See
+[docs/adr/0001](docs/adr/0001-cache-volume-over-self-hosted-cache-server.md).
+`zstd` stays installed: it is the compression format cache backends prefer.
 
 ## No DinD by design
 
-This image deliberately has **no Docker daemon, no docker CLI, and no dind
-sidecar**. The CI it serves is pure Go (`go build` / `go vet` / `go test` /
-lint / codegen), which never needs a docker socket. Leaving Docker out keeps
-the runner pod unprivileged — no `privileged: true`, smaller attack surface,
-faster scheduling. Workflows that genuinely need Docker (image builds,
-compose-based integration tests) should keep running on GitHub-hosted
-runners.
+This image deliberately has **no Docker daemon and no dind sidecar**. (The
+docker CLI binary is inherited from the base image — the Actions runner needs
+it for container actions — but with no daemon and no socket it is inert.) The
+CI it serves is pure Go (`go build` / `go vet` / `go test` / lint / codegen),
+which never needs a docker socket. Leaving the daemon out keeps the runner
+pod unprivileged — no `privileged: true`, smaller attack surface, faster
+scheduling. Workflows that genuinely need Docker (image builds, compose-based
+integration tests) should keep running on GitHub-hosted runners. Job-level
+`container:`/`services:` would additionally require `containerMode:
+kubernetes` on the scale set, which is not enabled.
 
 ## Building
 
 The image is built and pushed by
 [.github/workflows/build.yml](.github/workflows/build.yml) on every push to
-`main`, on any tag, and on manual dispatch. Layers are cached with
-`type=gha,mode=max`.
+`main`, on any tag, and on manual dispatch — one matrix leg per Go version
+line. Layers are cached with `type=gha,mode=max`, scoped per line.
 
 ## License
 

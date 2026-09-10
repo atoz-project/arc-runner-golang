@@ -17,6 +17,19 @@ jobs:
   build-and-push:
     # Public repo: GitHub-hosted runners are free here regardless of org billing.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # One image per Go version line. `line` is the floating minor tag that
+      # scale sets consume. Bumping a patch version = edit one matrix row.
+      # No :latest tag by design: consumers pin an explicit line (or date tag).
+      matrix:
+        include:
+          - go_version: "1.25.14"
+            go_sha256: "a21ae5633a269bcd7e90cf767e48225633795e99d831742cbf3397064fee7712"
+            line: "1.25"
+          - go_version: "1.26.8"
+            go_sha256: "d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b"
+            line: "1.26"
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -24,8 +37,15 @@ jobs:
       - name: Compute image tags
         id: tags
         run: |
-          # Immutable per-build tag: YYYYMMDD + run number (e.g. 202609101).
-          echo "date_tag=$(date -u +%Y%m%d)${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          # Immutable per-build tag: <go version>-<YYYYMMDD><run number>
+          # (e.g. 1.26.8-202609101). The version prefix keeps the matrix legs'
+          # tags distinct within one workflow run.
+          {
+            echo "tags<<EOF"
+            echo "${{ env.IMAGE }}:${{ matrix.line }}"
+            echo "${{ env.IMAGE }}:${{ matrix.go_version }}-$(date -u +%Y%m%d)${{ github.run_number }}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -42,11 +62,12 @@ jobs:
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ steps.tags.outputs.date_tag }}
-          # Layer cache in the GitHub Actions cache backend. This matters: a cold
-          # pull of the actions-runner base image is slow, and mode=max lets later
-          # builds reuse every layer.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            GO_VERSION=${{ matrix.go_version }}
+            GO_SHA256=${{ matrix.go_sha256 }}
+          tags: ${{ steps.tags.outputs.tags }}
+          # Layer cache in the GitHub Actions cache backend, scoped per version
+          # line so the two matrix legs don't clobber each other. mode=max lets
+          # later builds reuse every layer.
+          cache-from: type=gha,scope=go${{ matrix.line }}
+          cache-to: type=gha,mode=max,scope=go${{ matrix.line }}

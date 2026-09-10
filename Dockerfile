@@ -4,20 +4,28 @@
 # Check for updates: https://github.com/actions/runner/releases
 FROM ghcr.io/actions/actions-runner:2.337.0
 
-ARG GO_VERSION=1.26.2
-# SHA256 of https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz (from https://go.dev/dl/?mode=json).
-ARG GO_SHA256=990e6b4bbba816dc3ee129eaeaf4b42f17c2800b88a2166c265ac1a200262282
+# GO_VERSION is a build argument so build.yml builds one image per version line
+# (see README "Version lines"). GO_SHA256 must match GO_VERSION:
+# https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz (from https://go.dev/dl/?mode=json).
+ARG GO_VERSION=1.26.8
+ARG GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
 # golangci-lint: pinned to what our CI uses (v1.x while .golangci.yml is v1-schema).
 ARG GOLANGCI_LINT_VERSION=1.64.8
 ARG SQLC_VERSION=1.31.1
 ARG BUF_VERSION=1.72.0
 ARG GH_VERSION=2.100.0
+# protoc plugins are `go install`ed below; versions match what the org repos pin.
+ARG PROTOC_GEN_GO_VERSION=v1.36.10
+ARG PROTOC_GEN_CONNECT_GO_VERSION=v1.19.1
+# From https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/sha256.txt
+ARG BUF_SHA256=8720830e26a733da55bb89bcd3cb44849c0965fc0c44fb5d691cccdc64dca5af
 
 USER root
 
 # Toolchain and CI utilities. Keep this list minimal on purpose.
 # libc6-dev: C library headers — gcc alone cannot compile cgo (the race
-# detector and cgo builds need them). zstd: cache server compression.
+# detector and cgo builds need them). zstd: cache compression. musl-tools:
+# static linking targets (same precedent as the rust image).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -26,12 +34,15 @@ RUN apt-get update \
         git \
         jq \
         make \
+        musl-tools \
         zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# NO DinD BY DESIGN: this image intentionally ships without a Docker daemon,
-# docker CLI, or any container runtime. Our CI is pure Go (build / vet / test /
-# lint), which needs no docker socket. Leaving Docker out keeps the runner pod
+# NO DinD BY DESIGN: this image intentionally ships without a Docker daemon or
+# any container runtime. (The base image does include the docker CLI binary,
+# which the Actions runner needs for container actions; with no daemon and no
+# socket it is inert.) Our CI is pure Go (build / vet / test / lint), which
+# needs no docker socket. Leaving the daemon out keeps the runner pod
 # unprivileged (no privileged: true, no dind sidecar, smaller attack surface,
 # faster scheduling). Build jobs that genuinely need Docker must keep running
 # on GitHub-hosted runners instead.
@@ -41,8 +52,8 @@ RUN apt-get update \
 #   ${RUNNER_TOOL_CACHE}/go/<version>/<arch>.complete    <- empty completion marker
 # actions/setup-go (via @actions/tool-cache) only accepts a cached tool when BOTH
 # the directory and the sibling "<arch>.complete" marker file exist. With this
-# layout in place, setup-go (check-latest: false, the default) finds 1.26.2
-# locally and skips the download entirely.
+# layout in place, setup-go (check-latest: false, the default) finds the image's
+# Go locally and skips the download entirely.
 # Ref: https://github.com/actions/toolkit/blob/main/packages/tool-cache/src/tool-cache.ts
 ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache
 ENV GO_TOOLCACHE_DIR=${RUNNER_TOOL_CACHE}/go/${GO_VERSION}/x64
@@ -61,9 +72,15 @@ ENV PATH="${GO_TOOLCACHE_DIR}/bin:${PATH}"
 # Cache persistence contract (see README): all Go caches point into
 # /home/runner/.cache so a persistent volume mounted there captures the
 # module cache, build cache, and GOPATH across runner pods.
+# golangci-lint's own cache (~/.cache/golangci-lint) rides along for free.
 ENV GOPATH=/home/runner/.cache/go \
     GOMODCACHE=/home/runner/.cache/go-mod \
     GOCACHE=/home/runner/.cache/go-build
+# Private org modules: skip the public proxy/sumdb; auth is injected by workflow secrets.
+ENV GOPRIVATE=github.com/atoz-project/*
+# Fail loudly ("upgrade the image") instead of silently downloading a newer
+# toolchain when go.mod's toolchain directive is newer than this image's Go.
+ENV GOTOOLCHAIN=local
 
 # Go-based CLIs via `go install` with throwaway build caches in /tmp, so no
 # root-owned files ever land in /home/runner/.cache (that tree belongs to the
@@ -73,15 +90,18 @@ ENV GOPATH=/home/runner/.cache/go \
 # script: the prebuilt v1.64.8 binaries are compiled with go1.24 and
 # hard-refuse go1.26 module targets ("the Go language version (go1.24) used
 # to build golangci-lint is lower than the targeted Go version"). Compiling
-# it with this image's Go 1.26.2 matches what our CI does today.
+# it with this image's Go matches what our CI does today.
 RUN export GOBIN=/usr/local/bin GOPATH=/tmp/gopath GOMODCACHE=/tmp/gomodcache GOCACHE=/tmp/gocache \
     && go install "github.com/golangci/golangci-lint/cmd/golangci-lint@v${GOLANGCI_LINT_VERSION}" \
     && go install "github.com/sqlc-dev/sqlc/cmd/sqlc@v${SQLC_VERSION}" \
+    && go install "google.golang.org/protobuf/cmd/protoc-gen-go@${PROTOC_GEN_GO_VERSION}" \
+    && go install "connectrpc.com/connect/cmd/protoc-gen-connect-go@${PROTOC_GEN_CONNECT_GO_VERSION}" \
     && rm -rf /tmp/gopath /tmp/gomodcache /tmp/gocache
 
 # buf (proto codegen) and the GitHub CLI (repo automation scripts).
-# gh is verified against the checksums published on the release.
+# Both verified against checksums published on their releases.
 RUN curl -fsSL -o /usr/local/bin/buf "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-x86_64" \
+    && echo "${BUF_SHA256}  /usr/local/bin/buf" | sha256sum -c - \
     && chmod +x /usr/local/bin/buf \
     && curl -fsSL -o "/tmp/gh_${GH_VERSION}_linux_amd64.tar.gz" "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_amd64.tar.gz" \
     && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_checksums.txt" \
@@ -101,5 +121,7 @@ RUN go version \
     && golangci-lint --version \
     && sqlc version \
     && buf --version \
+    && protoc-gen-go --version \
+    && protoc-gen-connect-go --version \
     && gh --version \
     && zstd --version
