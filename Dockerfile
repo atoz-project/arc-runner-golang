@@ -16,12 +16,13 @@ ARG GH_VERSION=2.100.0
 USER root
 
 # Toolchain and CI utilities. Keep this list minimal on purpose.
-# zstd is required by the falcondev Actions cache server (compression backend).
+# libc6-dev: C library headers — gcc alone cannot compile cgo (the race
+# detector and cgo builds need them). zstd: cache server compression.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        gcc \
+        libc6-dev \
         git \
         jq \
         make \
