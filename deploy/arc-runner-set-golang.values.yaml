@@ -1,0 +1,33 @@
+# Helm values for the arc-runner-set-golang scale set (chart gha-runner-scale-set).
+#
+# THIS FILE IS THE SOURCE OF TRUTH. Apply changes with:
+#   helm upgrade arc-runner-set-golang \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     --version 0.13.0 -n arc-runners -f deploy/arc-runner-set-golang.values.yaml
+#
+# Rules learned the hard way (2026-09-10/11 incidents):
+# - --version MUST be pinned and MUST match the controller's minor (controller
+#   is 0.13.0; chart 0.14.2 against it silently orphaned the listener).
+# - Never upgrade with a stale copy of this file: helm replaces the whole
+#   rendered spec, so any drift between this file and the live CR is reverted.
+# - `image:` must point at an existing immutable tag. Rolling back to a values
+#   revision whose tag was since deleted from GHCR takes the set down.
+githubConfigSecret: github-config-secret
+githubConfigUrl: https://github.com/atoz-project
+minRunners: 1
+namespaceOverride: ""
+runnerGroup: arc-public
+template:
+  spec:
+    containers:
+    - command:
+      - /home/runner/run.sh
+      image: ghcr.io/atoz-project/arc-runner-golang:v1.0.0
+      name: runner
+      # 2026-09-11: bumped from the ECI default (2C/4Gi) — cellar's integration
+      # suite trips a pre-existing concurrency bug (cellar#161) at 2 vCPU.
+      # Stopgap; scale back down once #161 is fixed. requests==limits →
+      # Guaranteed QoS; ECI instances sized 4C/8Gi (~2x cost per task-minute).
+      resources:
+        requests: { cpu: "4", memory: 8Gi }
+        limits:   { cpu: "4", memory: 8Gi }
