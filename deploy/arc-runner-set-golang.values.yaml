@@ -23,7 +23,7 @@ template:
     containers:
     - command:
       - /home/runner/run.sh
-      image: ghcr.io/atoz-project/arc-runner-golang:v1.0.0
+      image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0
       name: runner
       # 2026-09-11: bumped from the ECI default (2C/4Gi) — cellar's integration
       # suite trips a pre-existing concurrency bug (cellar#161) at 2 vCPU.
