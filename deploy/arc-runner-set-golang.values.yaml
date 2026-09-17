@@ -19,6 +19,18 @@ minRunners: 1
 namespaceOverride: ""
 runnerGroup: arc-public
 template:
+  metadata:
+    annotations:
+      # 2026-09-18: x-platform check jobs (go test -race -cover, 95+ pkgs) died
+      # mid-compile with `mkdir /tmp/go-buildXXX/gocoverdir: no space left on
+      # device` — three pods (PR #245, PR #259, main push). The pod's ephemeral
+      # disk holds image layers (~3GiB, no ImageCache yet) + actions/cache
+      # restore (1.65GiB) + -race compile + GOCACHE + /tmp go-build — ~8GiB
+      # peak, over the ECI default. This annotation adds +20GiB billed ephemeral
+      # storage (ECI-only knob). The ephemeral-storage resource below is the
+      # portable fallback; two knobs on purpose — if ECI ignores one, the other
+      # still sizes the disk. Trim the annotation first if billing ever matters.
+      k8s.aliyun.com/eci-extra-ephemeral-storage: "20Gi"
   spec:
     containers:
     - command:
@@ -30,5 +42,9 @@ template:
       # Stopgap; scale back down once #161 is fixed. requests==limits →
       # Guaranteed QoS; ECI instances sized 4C/8Gi (~2x cost per task-minute).
       resources:
-        requests: { cpu: "4", memory: 8Gi }
-        limits:   { cpu: "4", memory: 8Gi }
+        # ephemeral-storage: 2026-09-18 ENOSPC incident (see annotation above);
+        # 20Gi request+limit keeps the k8s-native guarantee (scheduler admission
+        # + kubelet evicts cleanly at the limit instead of a raw ENOSPC) even
+        # off ECI, and ECI honors it for temp-disk sizing.
+        requests: { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
+        limits:   { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
