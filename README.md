@@ -145,19 +145,26 @@ spec:
   runnerGroup: arc-public
   minRunners: 1
   template:
+    metadata:
+      annotations:
+        # 2026-09-18 ENOSPC incident: +20GiB ephemeral storage for go test -race
+        # workloads (see values file for the full disk ledger)
+        k8s.aliyun.com/eci-extra-ephemeral-storage: "20Gi"
     spec:
       containers:
         - name: runner
           image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0   # pinned release — bump deliberately
           command: ["/home/runner/run.sh"]
-          volumeMounts:
-            - name: go-cache
-              mountPath: /home/runner/.cache   # matches the ENV contract above
-      volumes:
-        - name: go-cache
-          persistentVolumeClaim:
-            claimName: arc-golang-cache        # pre-created, see below
+          resources:
+            requests: { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
+            limits:   { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
 ```
+
+Note the rendered spec above is what `helm template` actually emits for
+`deploy/arc-runner-set-golang.values.yaml` — it intentionally does **not**
+mount the cache PVC yet. The PVC block below is the target design
+(ADR-0001) still awaiting a pre-created RWX claim; until it's wired, all Go
+caches ride the pod's ephemeral disk (which is why it's sized 20Gi+).
 
 Note the pod spec should also set `securityContext.fsGroup: 1001` (the runner
 uid) so the mounted cache volume is writable.
