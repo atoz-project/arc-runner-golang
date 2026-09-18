@@ -131,6 +131,10 @@ The deployed values are the source of truth in
 [deploy/arc-runner-set-golang.values.yaml](deploy/arc-runner-set-golang.values.yaml)
 — apply with `helm upgrade ... --version 0.14.2 -f deploy/…` (chart minor must
 match the controller; see the file header for the incident rules). The
+plain-Ubuntu `arc-runner-set` scale set (the target of x-platform's check
+jobs, `runs-on: arc-runner-set`) is also pinned here, captured from live
+state in [deploy/arc-runner-set.values.yaml](deploy/arc-runner-set.values.yaml)
+— same chart rules, same 2026-09-18 ephemeral-storage sizing. The
 rendered spec for reference:
 
 ```yaml

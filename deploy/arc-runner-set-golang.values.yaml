@@ -23,10 +23,13 @@ template:
     annotations:
       # 2026-09-18: x-platform check jobs (go test -race -cover, 95+ pkgs) died
       # mid-compile with `mkdir /tmp/go-buildXXX/gocoverdir: no space left on
-      # device` — three pods (PR #245, PR #259, main push). The pod's ephemeral
-      # disk holds image layers (~3GiB, no ImageCache yet) + actions/cache
-      # restore (1.65GiB) + -race compile + GOCACHE + /tmp go-build — ~8GiB
-      # peak, over the ECI default. This annotation adds +20GiB billed ephemeral
+      # device` — three pods (PR #245, PR #259, main push). The ephemeral disk
+      # holds image layers + actions/cache restore + GOCACHE + -race compile.
+      # Measured
+      # 2026-09-18 on a live check job (after this fix): peak 31GiB on the
+      # 50GiB disk — .cache alone grew to 19GiB (race test binaries), so the
+      # stock ECI default (30GiB, no knob) was always going to ENOSPC. This
+      # annotation adds +20GiB billed ephemeral
       # storage (ECI-only knob). The ephemeral-storage resource below is the
       # portable fallback; two knobs on purpose — if ECI ignores one, the other
       # still sizes the disk. Trim the annotation first if billing ever matters.

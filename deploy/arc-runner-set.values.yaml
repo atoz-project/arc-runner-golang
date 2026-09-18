@@ -1,0 +1,53 @@
+# Helm values for the plain arc-runner-set scale set (chart gha-runner-scale-set).
+#
+# THIS FILE IS THE SOURCE OF TRUTH. Apply changes with:
+#   helm upgrade arc-runner-set \
+#     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+#     --version 0.14.2 -n arc-runners --kube-context k8s-sg-dev \
+#     -f deploy/arc-runner-set.values.yaml
+#
+# Provenance: this set was previously deployed ad-hoc with no values file in
+# git (release revision 6, 2026-09-11). Captured from `helm get values
+# arc-runner-set` on 2026-09-18 and committed here so upgrades stop being
+# blind live-patches. Same chart-pin rules as
+# deploy/arc-runner-set-golang.values.yaml apply (controller is 0.14.2).
+#
+# KNOWN RISK resolved 2026-09-18: image pinned to an immutable tag (was
+# `actions-runner:latest`, digest-verified identical at pin time).
+githubConfigSecret: github-config-secret
+githubConfigUrl: https://github.com/atoz-project
+minRunners: 1
+namespaceOverride: ""
+runnerGroup: arc-public
+template:
+  metadata:
+    annotations:
+      # 2026-09-18: x-platform check jobs (runs-on: arc-runner-set, plain
+      # Ubuntu + apt build-essential + runtime Go download + actions/cache
+      # restore + `go test -race -count=1 -coverprofile` over 95+ pkgs) died
+      # with `mkdir /tmp/go-buildXXX/gocoverdir: no space left on device`
+      # (3 pods: PR #245, PR #259, main). These pods run stock images with
+      # zero disk config on ECI's default 30Gi ephemeral disk. +20GiB billed
+      # extra (measured: 30G→50G on the golang set with the same knob).
+      k8s.aliyun.com/eci-extra-ephemeral-storage: "20Gi"
+  spec:
+    containers:
+    - command: ["/home/runner/run.sh"]
+      # 2026-09-18 pinned off :latest (digest-verified identical: sha256:e5496277);
+      # floating tags silently drift on every runner release and defeat ECI
+      # ImageCache (exact name:tag match). Bump deliberately with a release
+      # note — same convention as the golang/rust sets.
+      image: ghcr.io/actions/actions-runner:2.337.0
+      name: runner
+      # 2026-09-18 churn root cause: without an explicit command the pod runs
+      # the image's default ENTRYPOINT, which exits 0 in <1s on ECI (reproduced
+      # minimally with `kubectl run` — no ARC involved), so every runner pod
+      # "Completed" before the runner binary ever started. The ERS recreated
+      # pods forever (1 per ~15s). The golang/rust sets set this command and
+      # never churned. Native entrypoint + ECI = broken; always set command.
+      resources:
+        # Portable fallback for the ECI annotation above (scheduler
+        # admission + clean kubelet eviction at the limit off ECI).
+        # Deliberately no cpu/memory here — untouched ECI defaults.
+        requests: { ephemeral-storage: 20Gi }
+        limits:   { ephemeral-storage: 20Gi }
