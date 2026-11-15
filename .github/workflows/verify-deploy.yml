@@ -1,0 +1,21 @@
+name: verify-deploy
+
+on:
+  pull_request:
+    paths: ["deploy/**", "scripts/**", ".github/workflows/verify-deploy.yml"]
+  push:
+    branches: [main]
+    paths: ["deploy/**", "scripts/**", ".github/workflows/verify-deploy.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Ensure PyYAML is installed
+        run: python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+      - name: Verify Helm deploy values
+        run: bash scripts/verify-deploy-values.sh

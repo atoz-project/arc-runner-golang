@@ -42,7 +42,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.25"   # explicit minor spec; baked lines resolve with zero download
-          cache: true          # module/build cache via the Actions cache backend (works on ARC)
+          cache: false         # /home/runner/.cache persists on the scale set NAS volume (ADR-0001)
     # or: go-version-file: go.mod
       - run: go test ./...
 ```
@@ -119,23 +119,11 @@ GOCACHE=/home/runner/.cache/go-build
 so **a persistent volume mounted at `/home/runner/.cache` captures
 everything** — module cache, build cache, GOPATH — and survives runner pod
 churn. golangci-lint's cache (`~/.cache/golangci-lint`) rides along for free.
-See the cache PV section below. Once the PV is proven warm, set
-`cache: false` on `setup-go` in your workflows — its save/restore round-trip
-to the GitHub cache service becomes redundant.
+See the [Cache volume](#cache-volume) section below. With the shared NAS mounted, set `cache: false` on `setup-go` in your workflows so jobs skip redundant save and restore round-trips to GitHub's cache service.
 
 ## The live scale set
 
-Deployed as `arc-runner-set-golang` in namespace `arc-runners` (k8s-sg-dev)
-via the `gha-runner-scale-set` chart 0.14.2.
-The deployed values are the source of truth in
-[deploy/arc-runner-set-golang.values.yaml](deploy/arc-runner-set-golang.values.yaml)
-— apply with `helm upgrade ... --version 0.14.2 -f deploy/…` (chart minor must
-match the controller; see the file header for the incident rules). The
-plain-Ubuntu `arc-runner-set` scale set (the target of x-platform's check
-jobs, `runs-on: arc-runner-set`) is also pinned here, captured from live
-state in [deploy/arc-runner-set.values.yaml](deploy/arc-runner-set.values.yaml)
-— same chart rules, same 2026-09-18 ephemeral-storage sizing. The
-rendered spec for reference:
+Deployed as `arc-runner-set-golang` in namespace `arc-runners` (k8s-sg-dev) via the `gha-runner-scale-set` chart 0.14.2. The deployed values live in [deploy/arc-runner-set-golang.values.yaml](deploy/arc-runner-set-golang.values.yaml). Apply changes with `helm upgrade ... --version 0.14.2 -n arc-runners --kube-context k8s-sg-dev -f deploy/...` (the chart minor must match the controller; see the file header for the incident rules). The plain-Ubuntu `arc-runner-set` scale set (`runs-on: arc-runner-set`) is also pinned here in [deploy/arc-runner-set.values.yaml](deploy/arc-runner-set.values.yaml) with the same chart rules and ECI default sizing (`2C/4Gi`, 30GiB root disk). Both values files are checked in CI by [scripts/verify-deploy-values.sh](scripts/verify-deploy-values.sh). The rendered spec for `arc-runner-set-golang`:
 
 ```yaml
 apiVersion: actions.github.com/v1alpha1
@@ -149,56 +137,31 @@ spec:
   runnerGroup: arc-public
   minRunners: 1
   template:
-    metadata:
-      annotations:
-        # 2026-09-18 ENOSPC incident: +20GiB ephemeral storage for go test -race
-        # workloads (see values file for the full disk ledger)
-        k8s.aliyun.com/eci-extra-ephemeral-storage: "20Gi"
     spec:
+      securityContext:
+        fsGroup: 1001
       containers:
         - name: runner
-          image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0   # pinned release — bump deliberately
+          image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0
           command: ["/home/runner/run.sh"]
+          volumeMounts:
+            - name: cache
+              mountPath: /home/runner/.cache
           resources:
-            requests: { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
-            limits:   { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
+            requests: { cpu: "2", memory: 4Gi }
+            limits:   { cpu: "2", memory: 4Gi }
+      volumes:
+        - name: cache
+          nfs:
+            server: 071vdgqttek72nsstpz-nnu91.ap-southeast-1.nas.aliyuncs.com
+            path: /
 ```
 
-Note the rendered spec above is what `helm template` actually emits for
-`deploy/arc-runner-set-golang.values.yaml` — it intentionally does **not**
-mount the cache PVC yet. The PVC block below is the target design
-(ADR-0001) still awaiting a pre-created RWX claim; until it's wired, all Go
-caches ride the pod's ephemeral disk (which is why it's sized 20Gi+).
+The rendered spec above matches `helm template` output for `deploy/arc-runner-set-golang.values.yaml`.
 
-Note the pod spec should also set `securityContext.fsGroup: 1001` (the runner
-uid) so the mounted cache volume is writable.
+### Cache volume
 
-### Cache PV
-
-The new ARC API (`actions.github.com/v1alpha1`) has **no
-`volumeClaimTemplates`** on the runner pod template — and per-pod claims
-would defeat cache sharing anyway (every new runner pod would get a fresh,
-cold volume). Instead, pre-create **one shared PVC** and reference it from the
-scale set, as above:
-
-```yaml
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: arc-golang-cache
-  namespace: arc-runners
-spec:
-  accessModes: ["ReadWriteMany"]       # RWX so every runner pod mounts the same cache
-  storageClassName: <your-rwx-storage-class>   # e.g. an NFS-backed class
-  resources:
-    requests:
-      storage: 100Gi
-```
-
-If your cluster has no RWX provisioner, use `ReadWriteOnce` with
-`maxRunners: 1`, or accept per-pod `emptyDir` caches (drop the volume
-entirely — the ENV contract still keeps caches in one place within a pod's
-lifetime).
+The ACK Serverless cluster has no CSI provisioner, so `arc-runner-set-golang` mounts an Alibaba Cloud Capacity NAS directly as an in-tree `nfs` volume (RWX across concurrent runner pods) with `securityContext.fsGroup: 1001` and root permissions `1777`. Every runner pod shares the same module, build, and `golangci-lint` caches under `/home/runner/.cache`.
 
 The cache is shared, writable CI state: module contents are still verified
 against each repo's `go.sum`, and the build cache is content-addressed, but

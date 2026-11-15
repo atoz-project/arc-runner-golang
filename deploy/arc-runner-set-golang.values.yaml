@@ -3,7 +3,8 @@
 # THIS FILE IS THE SOURCE OF TRUTH. Apply changes with:
 #   helm upgrade arc-runner-set-golang \
 #     oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
-#     --version 0.14.2 -n arc-runners -f deploy/arc-runner-set-golang.values.yaml
+#     --version 0.14.2 -n arc-runners --kube-context k8s-sg-dev \
+#     -f deploy/arc-runner-set-golang.values.yaml
 #
 # Rules learned the hard way (2026-09-10/11 incidents):
 # - --version MUST be pinned and MUST match the controller's minor (controller
@@ -19,35 +20,27 @@ minRunners: 1
 namespaceOverride: ""
 runnerGroup: arc-public
 template:
-  metadata:
-    annotations:
-      # 2026-09-18: x-platform check jobs (go test -race -cover, 95+ pkgs) died
-      # mid-compile with `mkdir /tmp/go-buildXXX/gocoverdir: no space left on
-      # device` — three pods (PR #245, PR #259, main push). The ephemeral disk
-      # holds image layers + actions/cache restore + GOCACHE + -race compile.
-      # Measured
-      # 2026-09-18 on a live check job (after this fix): peak 31GiB on the
-      # 50GiB disk — .cache alone grew to 19GiB (race test binaries), so the
-      # stock ECI default (30GiB, no knob) was always going to ENOSPC. This
-      # annotation adds +20GiB billed ephemeral
-      # storage (ECI-only knob). The ephemeral-storage resource below is the
-      # portable fallback; two knobs on purpose — if ECI ignores one, the other
-      # still sizes the disk. Trim the annotation first if billing ever matters.
-      k8s.aliyun.com/eci-extra-ephemeral-storage: "20Gi"
   spec:
+    # Match runner uid (1001) so mounted cache directories stay writable by the job user.
+    securityContext:
+      fsGroup: 1001
     containers:
     - command:
       - /home/runner/run.sh
       image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0
       name: runner
-      # 2026-09-11: bumped from the ECI default (2C/4Gi) — cellar's integration
-      # suite trips a pre-existing concurrency bug (cellar#161) at 2 vCPU.
-      # Stopgap; scale back down once #161 is fixed. requests==limits →
-      # Guaranteed QoS; ECI instances sized 4C/8Gi (~2x cost per task-minute).
+      volumeMounts:
+        - name: cache
+          mountPath: /home/runner/.cache
+      # Guaranteed QoS (requests == limits) pins the 2C/4Gi ECI instance tier.
       resources:
-        # ephemeral-storage: 2026-09-18 ENOSPC incident (see annotation above);
-        # 20Gi request+limit keeps the k8s-native guarantee (scheduler admission
-        # + kubelet evicts cleanly at the limit instead of a raw ENOSPC) even
-        # off ECI, and ECI honors it for temp-disk sizing.
-        requests: { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
-        limits:   { cpu: "4", memory: 8Gi, ephemeral-storage: 20Gi }
+        requests: { cpu: "2", memory: 4Gi }
+        limits:   { cpu: "2", memory: 4Gi }
+    volumes:
+      # No CSI driver or StorageClass exists in k8s-sg-dev, so mount the
+      # Capacity NAS directly via in-tree nfs (ap-southeast-1a, security-labs
+      # account, 071vdgqttek72nsstpz, owner=arc-runner-golang, root mode 1777).
+      - name: cache
+        nfs:
+          server: 071vdgqttek72nsstpz-nnu91.ap-southeast-1.nas.aliyuncs.com
+          path: /

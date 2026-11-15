@@ -4,7 +4,7 @@ Earlier the same day we shipped one image per Go version line (`:1.25`, `:1.26`
 tags, one scale set per line, `runs-on` label = version choice). We reversed
 course: **one image** bakes all org-aligned Go patch versions into the
 hostedtoolcache layout, and **version selection happens in each workflow** via
-`actions/setup-go@v7` with an explicit `go-version` and `cache: true`.
+`actions/setup-go@v7` with an explicit `go-version` and `cache: false` (ADR-0001's shared cache volume persists Go caches across pods).
 
 Why the reversal: (a) ADR-0002's `GOTOOLCHAIN=auto` dissolved the "image version
 is a hard boundary" property the dual-line design was paying for; (b) version
@@ -44,5 +44,7 @@ Status: accepted (2026-09-10, human decision)
   consumed by anyone but the scale set itself.)
 
 - Consumer contract: `runs-on: arc-runner-set-golang` + `setup-go@v7` with
-  explicit `go-version` + `cache: true`. Works identically on GitHub-hosted
-  runners, so it doubles as the overflow/DR path.
+  explicit `go-version` + `cache: false` (ADR-0001's shared volume holds
+  `/home/runner/.cache` across pods; use `cache: true` only on non-ARC overflow
+  runners). Works identically on GitHub-hosted runners, so it doubles as the
+  overflow/DR path.
