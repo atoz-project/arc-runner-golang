@@ -22,8 +22,8 @@ Meanwhile, pod-local testing at `2C/4Gi` Guaranteed QoS passed `x-platform` `go 
 Keep `/home/runner/.cache` unmounted on pod-local storage and mount Capacity NAS at `/mnt/nas-cache` solely for sequential `.tar.zst` streaming through GitHub Actions runner hooks (`ACTIONS_RUNNER_HOOK_JOB_STARTED` and `ACTIONS_RUNNER_HOOK_JOB_COMPLETED`).
 
 - Both hook scripts (`arc-cache-restore.sh` and `arc-cache-save.sh`) are written by the container startup `command` inside [deploy/arc-runner-set-golang.values.yaml](../../deploy/arc-runner-set-golang.values.yaml), avoiding an image rebuild and preserving the ECI `ImageCache` match on `:v2.0.0`.
-- Snapshots isolate by repository and workflow job at `/mnt/nas-cache/v1/<repo_slug>/<job_slug>/snap-<epoch>-<host>-<pid>.tar.zst`. Restore falls back only within `<repo_slug>/*/` so `$GOPATH/bin` never leaks across repos.
-- Save strips `go-mod/cache/download/*.tmp`, caps `go-build` plus `golangci-lint` at `7500 MiB` and downloaded `.zip` archives at `1500 MiB` by `st_mtime`, streams `tar | zstd -1 -T0` to a `.tmp` file, and promotes atomically with `mv`.
+- Snapshots isolate by repository and workflow job at `/mnt/nas-cache/v1/<repo_slug>/<job_slug>/snap-<epoch>-<host>-<bashpid>.tar.zst`. Restore falls back only within `<repo_slug>/*/` so `$GOPATH/bin` never leaks across repos.
+- Save strips `go-mod/cache/download/*.tmp`, caps `go-build` plus `golangci-lint` at `4500 MiB` and downloaded `.zip` archives at `256 MiB` by `st_mtime`, streams `tar | zstd -1 -T0` to a `.tmp` file, and promotes atomically with `mv`.
 - Garbage collection keeps the 2 newest snapshots per job unconditionally and deletes older ones only after a 30-minute grace window (`1800s`), preventing NFSv3 `ESTALE` for concurrent readers.
 - Both hooks are non-fatal (`::warning::` and exit `0` on failure) and never touch the consumer `setup-go` `cache: false` contract.
 
@@ -32,4 +32,4 @@ Keep `/home/runner/.cache` unmounted on pod-local storage and mount Capacity NAS
 - File locks, `mmap`, and compiler I/O run against pod-local disk with zero NFS race or bus-error exposure.
 - Each job transfers one sequential archive stream over VPC LAN instead of thousands of small-file RPCs.
 - Consumer workflows keep `cache: false` on `setup-go` and drop redundant `actions/cache` steps targeting `~/.cache/{go,go-mod,go-build}`.
-- Snapshot size caps (`9000 MiB` combined across pruned build and zip caches) preserve disk headroom on the default `30 GiB` ECI disk without paid `+20Gi` storage.
+- Snapshot size caps (`4756 MiB` combined across pruned build and zip caches) preserve disk headroom on the default `30 GiB` ECI disk without paid `+20Gi` storage.

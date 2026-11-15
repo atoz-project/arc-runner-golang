@@ -60,6 +60,7 @@ assert (go_spec.get("securityContext") or {}).get("fsGroup") == 1001, "golang: f
 cmd = go_runner.get("command") or []
 if len(cmd) != 5 or cmd[:3] != ["/bin/bash", "-euo", "pipefail"] or cmd[3] != "-c":
     raise AssertionError(f"golang: unexpected command {cmd[:4]!r}")
+assert "$$" not in cmd[4], "golang: avoid $$ in Container.command (kubelet unescapes $$ to literal $); use ${BASHPID}"
 assert not str(go_runner.get("image", "")).endswith(":latest"), "golang: image must not use :latest"
 
 envs = {e.get("name"): e.get("value") for e in (go_runner.get("env") or []) if "name" in e}
@@ -132,7 +133,14 @@ chmod 0755 "$CACHE/go/bin/custom-lint"
 head -c $((2 * 1024 * 1024)) /dev/zero > "$CACHE/go-build/00/obj"
 
 GITHUB_REPOSITORY=atoz-project/alpha GITHUB_WORKFLOW=CI GITHUB_JOB=check bash "$ARC_RUNNER_HOME/arc-cache-save.sh"
-compgen -G "$ARC_NAS_CACHE_DIR/atoz-project_alpha/CI__check/snap-*.tar.zst" >/dev/null
+snap_saved="$(compgen -G "$ARC_NAS_CACHE_DIR/atoz-project_alpha/CI__check/snap-*.tar.zst" | head -n 1)"
+test -n "$snap_saved"
+case "$(basename "$snap_saved")" in
+  *'$'*)
+    echo "unexpected literal \$ in snapshot filename: $snap_saved" >&2
+    exit 1
+    ;;
+esac
 
 chmod -R u+w "$CACHE" && rm -rf "$CACHE"/*
 GITHUB_REPOSITORY=atoz-project/alpha GITHUB_WORKFLOW=CI GITHUB_JOB=release bash "$ARC_RUNNER_HOME/arc-cache-restore.sh"

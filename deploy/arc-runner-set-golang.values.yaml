@@ -135,8 +135,8 @@ template:
 
         cache_dir = sys.argv[1]
         KEEP_BUILD_FILES = {"README", "trim.txt"}
-        BUILD_CAP = 7500 * 1024 * 1024
-        ZIP_CAP = 1500 * 1024 * 1024
+        BUILD_CAP = 4500 * 1024 * 1024
+        ZIP_CAP = 256 * 1024 * 1024
 
         def prune_entries(entries, cap_bytes):
             entries.sort(key=lambda item: item[0], reverse=True)
@@ -210,8 +210,8 @@ template:
         mkdir -p "$job_dir"
 
         epoch="$(date +%s)"
-        tmp_file="${job_dir}/.snap-${epoch}-${host_slug}-$$.tar.zst.tmp"
-        final_file="${job_dir}/snap-${epoch}-${host_slug}-$$.tar.zst"
+        tmp_file="${job_dir}/.snap-${epoch}-${host_slug}-${BASHPID}.tar.zst.tmp"
+        final_file="${job_dir}/snap-${epoch}-${host_slug}-${BASHPID}.tar.zst"
 
         tar -C "$cache_dir" --warning=no-file-changed -cf - . | zstd -1 -T0 -q -o "$tmp_file"
         mv -f "$tmp_file" "$final_file"
