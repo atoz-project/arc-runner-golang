@@ -5,7 +5,7 @@ CHART_REF="oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-sca
 CHART_VERSION="0.14.2"
 
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'chmod -R u+w "$TMP_DIR" 2>/dev/null || true; rm -rf "$TMP_DIR"' EXIT
 
 helm pull "$CHART_REF" --version "$CHART_VERSION" --untar -d "$TMP_DIR" >/dev/null
 CHART_DIR="$TMP_DIR/gha-runner-scale-set"
@@ -24,7 +24,7 @@ render_set() {
 render_set arc-runner-set-golang deploy/arc-runner-set-golang.values.yaml
 render_set arc-runner-set deploy/arc-runner-set.values.yaml
 
-python3 - "$TMP_DIR/arc-runner-set-golang.yaml" "$TMP_DIR/arc-runner-set.yaml" <<'PY'
+python3 - "$TMP_DIR/arc-runner-set-golang.yaml" "$TMP_DIR/arc-runner-set.yaml" "$TMP_DIR/bootstrap.sh" <<'PY'
 import sys
 import yaml
 
@@ -57,12 +57,26 @@ go_spec = go_tpl["spec"]
 go_runner = get_runner_container(go_spec, sys.argv[1])
 
 assert (go_spec.get("securityContext") or {}).get("fsGroup") == 1001, "golang: fsGroup must be 1001"
-assert go_runner.get("command") == ["/home/runner/run.sh"], f"golang: bad command {go_runner.get('command')}"
+cmd = go_runner.get("command") or []
+if len(cmd) != 5 or cmd[:3] != ["/bin/bash", "-euo", "pipefail"] or cmd[3] != "-c":
+    raise AssertionError(f"golang: unexpected command {cmd[:4]!r}")
 assert not str(go_runner.get("image", "")).endswith(":latest"), "golang: image must not use :latest"
 
+envs = {e.get("name"): e.get("value") for e in (go_runner.get("env") or []) if "name" in e}
+expected_envs = {
+    "ACTIONS_RUNNER_HOOK_JOB_STARTED": "/home/runner/arc-cache-restore.sh",
+    "ACTIONS_RUNNER_HOOK_JOB_COMPLETED": "/home/runner/arc-cache-save.sh",
+    "ARC_NAS_CACHE_DIR": "/mnt/nas-cache/v1",
+}
+for k, v in expected_envs.items():
+    if envs.get(k) != v:
+        raise AssertionError(f"golang: env[{k}] = {envs.get(k)!r}, want {v!r}")
+
 mounts = go_runner.get("volumeMounts") or []
-if not any(m.get("name") == "cache" and m.get("mountPath") == "/home/runner/.cache" for m in mounts):
-    raise AssertionError(f"golang: missing /home/runner/.cache mount in {mounts}")
+if not any(m.get("name") == "cache" and m.get("mountPath") == "/mnt/nas-cache" for m in mounts):
+    raise AssertionError(f"golang: missing /mnt/nas-cache mount in {mounts}")
+if any(m.get("mountPath") == "/home/runner/.cache" for m in mounts):
+    raise AssertionError(f"golang: /home/runner/.cache must stay pod-local, got {mounts}")
 
 vols = go_spec.get("volumes") or []
 cache_vols = [v for v in vols if v.get("name") == "cache"]
@@ -79,6 +93,9 @@ for bucket in ("requests", "limits"):
         raise AssertionError(f"golang: resources.{bucket} = {got}, want {expected_res}")
 assert_no_extra_disk(go_tpl, go_runner, sys.argv[1])
 
+with open(sys.argv[3], "w", encoding="utf-8") as fh:
+    fh.write(cmd[4])
+
 plain_doc = load_runner_set(sys.argv[2])
 plain_tpl = plain_doc["spec"]["template"]
 plain_spec = plain_tpl["spec"]
@@ -87,6 +104,47 @@ plain_runner = get_runner_container(plain_spec, sys.argv[2])
 assert plain_runner.get("command") == ["/home/runner/run.sh"], f"plain: bad command {plain_runner.get('command')}"
 assert not str(plain_runner.get("image", "")).endswith(":latest"), "plain: image must not use :latest"
 assert_no_extra_disk(plain_tpl, plain_runner, sys.argv[2])
-
-print("verify-deploy-values: OK")
 PY
+
+export ARC_RUNNER_HOME="$TMP_DIR/runner"
+export ARC_NAS_CACHE_DIR="$TMP_DIR/nas/v1"
+CACHE="$ARC_RUNNER_HOME/.cache"
+mkdir -p "$ARC_RUNNER_HOME" "$ARC_NAS_CACHE_DIR"
+cat > "$ARC_RUNNER_HOME/run.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$ARC_RUNNER_HOME/run.sh"
+
+bash "$TMP_DIR/bootstrap.sh"
+test -x "$ARC_RUNNER_HOME/arc-cache-restore.sh"
+test -x "$ARC_RUNNER_HOME/arc-cache-save.sh"
+bash -n "$ARC_RUNNER_HOME/arc-cache-restore.sh"
+bash -n "$ARC_RUNNER_HOME/arc-cache-save.sh"
+
+mkdir -p "$CACHE/go-mod/example.com/pkg@v1.0.0" "$CACHE/go-mod/cache/download" "$CACHE/go/bin" "$CACHE/go-build/00"
+printf 'package pkg\n' > "$CACHE/go-mod/example.com/pkg@v1.0.0/a.go"
+chmod 0444 "$CACHE/go-mod/example.com/pkg@v1.0.0/a.go"
+chmod 0555 "$CACHE/go-mod/example.com/pkg@v1.0.0"
+touch "$CACHE/go-mod/cache/download/foo.zip123.tmp"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$CACHE/go/bin/custom-lint"
+chmod 0755 "$CACHE/go/bin/custom-lint"
+head -c $((2 * 1024 * 1024)) /dev/zero > "$CACHE/go-build/00/obj"
+
+GITHUB_REPOSITORY=atoz-project/alpha GITHUB_WORKFLOW=CI GITHUB_JOB=check bash "$ARC_RUNNER_HOME/arc-cache-save.sh"
+compgen -G "$ARC_NAS_CACHE_DIR/atoz-project_alpha/CI__check/snap-*.tar.zst" >/dev/null
+
+chmod -R u+w "$CACHE" && rm -rf "$CACHE"/*
+GITHUB_REPOSITORY=atoz-project/alpha GITHUB_WORKFLOW=CI GITHUB_JOB=release bash "$ARC_RUNNER_HOME/arc-cache-restore.sh"
+test -f "$CACHE/go-mod/example.com/pkg@v1.0.0/a.go"
+test -x "$CACHE/go/bin/custom-lint"
+test -f "$CACHE/go-build/00/obj"
+test ! -e "$CACHE/go-mod/cache/download/foo.zip123.tmp"
+
+chmod -R u+w "$CACHE" && rm -rf "$CACHE"/*
+GITHUB_REPOSITORY=atoz-project/beta GITHUB_WORKFLOW=CI GITHUB_JOB=check bash "$ARC_RUNNER_HOME/arc-cache-restore.sh"
+test ! -e "$CACHE/go/bin/custom-lint"
+test ! -e "$CACHE/go-mod/example.com/pkg@v1.0.0/a.go"
+test -d "$CACHE/go-build"
+
+echo "verify-deploy-values: OK"

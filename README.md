@@ -42,7 +42,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: "1.25"   # explicit minor spec; baked lines resolve with zero download
-          cache: false         # /home/runner/.cache persists on the scale set NAS volume (ADR-0001)
+          cache: false         # Go caches persist across pods via NAS job hooks (ADR-0005)
     # or: go-version-file: go.mod
       - run: go test ./...
 ```
@@ -116,20 +116,17 @@ GOMODCACHE=/home/runner/.cache/go-mod
 GOCACHE=/home/runner/.cache/go-build
 ```
 
-so **a persistent volume mounted at `/home/runner/.cache` captures
-everything** — module cache, build cache, GOPATH — and survives runner pod
-churn. golangci-lint's cache (`~/.cache/golangci-lint`) rides along for free.
-See the [Cache volume](#cache-volume) section below. With the shared NAS mounted, set `cache: false` on `setup-go` in your workflows so jobs skip redundant save and restore round-trips to GitHub's cache service.
+All Go and `golangci-lint` caches run against fast pod-local block storage at `/home/runner/.cache`. Runner job hooks (`ACTIONS_RUNNER_HOOK_JOB_STARTED` and `ACTIONS_RUNNER_HOOK_JOB_COMPLETED`) restore before each job and save after each job as compressed `.tar.zst` archives on the scale set's shared NAS mount (`/mnt/nas-cache/v1`). See the [Cache volume](#cache-volume) section and [ADR-0005](docs/adr/0005-pod-local-cache-with-nas-zstd-snapshots.md). Set `cache: false` on `setup-go` in consumer workflows so jobs skip redundant round-trips to GitHub's hosted cache service.
 
 ## The live scale set
 
-Deployed as `arc-runner-set-golang` in namespace `arc-runners` (k8s-sg-dev) via the `gha-runner-scale-set` chart 0.14.2. The deployed values live in [deploy/arc-runner-set-golang.values.yaml](deploy/arc-runner-set-golang.values.yaml). Apply changes with `helm upgrade ... --version 0.14.2 -n arc-runners --kube-context k8s-sg-dev -f deploy/...` (the chart minor must match the controller; see the file header for the incident rules). The plain-Ubuntu `arc-runner-set` scale set (`runs-on: arc-runner-set`) is also pinned here in [deploy/arc-runner-set.values.yaml](deploy/arc-runner-set.values.yaml) with the same chart rules and ECI default sizing (`2C/4Gi`, 30GiB root disk). Both values files are checked in CI by [scripts/verify-deploy-values.sh](scripts/verify-deploy-values.sh). The rendered spec for `arc-runner-set-golang`:
+Deployed as `arc-runner-set-golang` in namespace `arc-runners` (k8s-sg-dev) via the `gha-runner-scale-set` chart 0.14.2. The deployed values live in [deploy/arc-runner-set-golang.values.yaml](deploy/arc-runner-set-golang.values.yaml). Apply changes with `helm upgrade ... --version 0.14.2 -n arc-runners --kube-context k8s-sg-dev -f deploy/...` (the chart minor must match the controller; see the file header for the incident rules). The plain-Ubuntu `arc-runner-set` scale set (`runs-on: arc-runner-set`) is also pinned here in [deploy/arc-runner-set.values.yaml](deploy/arc-runner-set.values.yaml) with the same chart rules and ECI default sizing (`2C/4Gi`, 30GiB root disk). Both values files and the offline hook scripts are checked in CI by [scripts/verify-deploy-values.sh](scripts/verify-deploy-values.sh). Structure of the rendered `AutoscalingRunnerSet` for `arc-runner-set-golang`:
 
 ```yaml
 apiVersion: actions.github.com/v1alpha1
 kind: AutoscalingRunnerSet
 metadata:
-  name: arc-runner-set-golang      # <- must match runs-on:
+  name: arc-runner-set-golang
   namespace: arc-runners
 spec:
   githubConfigUrl: https://github.com/atoz-project
@@ -143,10 +140,17 @@ spec:
       containers:
         - name: runner
           image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0
-          command: ["/home/runner/run.sh"]
+          command: ["/bin/bash", "-euo", "pipefail", "-c", "<writes hooks; exec /home/runner/run.sh>"]
+          env:
+            - name: ACTIONS_RUNNER_HOOK_JOB_STARTED
+              value: /home/runner/arc-cache-restore.sh
+            - name: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+              value: /home/runner/arc-cache-save.sh
+            - name: ARC_NAS_CACHE_DIR
+              value: /mnt/nas-cache/v1
           volumeMounts:
             - name: cache
-              mountPath: /home/runner/.cache
+              mountPath: /mnt/nas-cache
           resources:
             requests: { cpu: "2", memory: 4Gi }
             limits:   { cpu: "2", memory: 4Gi }
@@ -157,16 +161,15 @@ spec:
             path: /
 ```
 
-The rendered spec above matches `helm template` output for `deploy/arc-runner-set-golang.values.yaml`.
+The inline bootstrap script in [deploy/arc-runner-set-golang.values.yaml](deploy/arc-runner-set-golang.values.yaml) installs both cache hook scripts at pod start and hands off to `/home/runner/run.sh`.
 
 ### Cache volume
 
-The ACK Serverless cluster has no CSI provisioner, so `arc-runner-set-golang` mounts an Alibaba Cloud Capacity NAS directly as an in-tree `nfs` volume (RWX across concurrent runner pods) with `securityContext.fsGroup: 1001` and root permissions `1777`. Every runner pod shares the same module, build, and `golangci-lint` caches under `/home/runner/.cache`.
+The ACK Serverless cluster has no CSI provisioner, so `arc-runner-set-golang` mounts Alibaba Cloud Capacity NAS (`071vdgqttek72nsstpz`, `securityContext.fsGroup: 1001`, root mode `1777`) at `/mnt/nas-cache` instead of directly onto `/home/runner/.cache`. ECI mounts in-tree NFSv3 with `nolock,local_lock=all`, so direct concurrent Go builds on shared NFS suffer lock races, linker `mmap` `SIGBUS`, cross-repo `$GOPATH/bin` shadowing, and slow metadata RPCs.
 
-The cache is shared, writable CI state: module contents are still verified
-against each repo's `go.sum`, and the build cache is content-addressed, but
-treat the volume as within the trust boundary of every workflow that runs on
-the scale set.
+Instead, every job runs `Go` against pod-local storage (`/home/runner/.cache`), while the job hooks stream one zstd-compressed tarball per job finish to `/mnt/nas-cache/v1/<repo_slug>/<job_slug>/snap-*.tar.zst`. Restore falls back only across jobs within the same repository. Save bounds cached `go-build` plus `golangci-lint` files to `7500 MiB` and downloaded module `.zip` archives to `1500 MiB`, and retains the two newest snapshots plus a 30-minute deletion grace window to avoid NFSv3 `ESTALE`. See [ADR-0005](docs/adr/0005-pod-local-cache-with-nas-zstd-snapshots.md).
+
+The cache is shared, writable CI state: module contents are still verified against each repo's `go.sum`, so treat `/mnt/nas-cache` as within the trust boundary of workflows on this scale set.
 
 ## ECI ImageCache
 

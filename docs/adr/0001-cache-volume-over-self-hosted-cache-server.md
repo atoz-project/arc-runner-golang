@@ -1,8 +1,10 @@
 ---
-status: accepted
+status: accepted (amended by ADR-0005)
 ---
 
 # Cache volume over self-hosted Actions cache server
+
+> **Amendment:** Direct NFS mounts at `/home/runner/.cache` proved unsafe and slow under concurrent ECI pods; [ADR-0005](0005-pod-local-cache-with-nas-zstd-snapshots.md) moves the NAS mount to `/mnt/nas-cache` with pod-local `.cache` restored and saved via runner hook `.tar.zst` snapshots.
 
 Go CI speed comes from persistent caches, not from a self-hosted Actions cache
 server. We relocate all Go caches under `/home/runner/.cache` and mount one

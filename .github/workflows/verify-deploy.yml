@@ -15,7 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Ensure PyYAML is installed
-        run: python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+      - name: Ensure PyYAML and zstd are installed
+        run: |
+          python3 -c "import yaml" 2>/dev/null || python3 -m pip install --quiet pyyaml
+          command -v zstd >/dev/null || (sudo apt-get update && sudo apt-get install -y --no-install-recommends zstd)
       - name: Verify Helm deploy values
         run: bash scripts/verify-deploy-values.sh

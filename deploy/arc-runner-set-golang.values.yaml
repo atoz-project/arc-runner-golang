@@ -26,20 +26,257 @@ template:
       fsGroup: 1001
     containers:
     - command:
-      - /home/runner/run.sh
+      - /bin/bash
+      - -euo
+      - pipefail
+      - -c
+      - |
+        ARC_RUNNER_HOME="${ARC_RUNNER_HOME:-/home/runner}"
+        cat > "${ARC_RUNNER_HOME}/arc-cache-restore.sh" <<'EOF'
+        #!/usr/bin/env bash
+        set -eEuo pipefail
+
+        cache_dir="${ARC_RUNNER_HOME:-/home/runner}/.cache"
+        nas_dir="${ARC_NAS_CACHE_DIR:-/mnt/nas-cache/v1}"
+
+        reset_cache() {
+          chmod -R u+w "$cache_dir" 2>/dev/null || true
+          rm -rf "$cache_dir"/* "$cache_dir"/.[!.]* "$cache_dir"/..?* 2>/dev/null || true
+          mkdir -p "$cache_dir/go" "$cache_dir/go-mod" "$cache_dir/go-build"
+        }
+
+        on_err() {
+          local rc=$?
+          echo "::warning::arc-cache-restore failed (exit ${rc}); continuing with empty local cache" >&2
+          reset_cache || true
+          exit 0
+        }
+        trap on_err ERR
+
+        slugify() {
+          local out
+          out="$(printf '%s' "$1" | LC_ALL=C tr -cs 'A-Za-z0-9._-' '_' | sed 's/^[._]*//;s/[._]*$//')"
+          printf '%s' "${out:-default}"
+        }
+
+        repo_slug="$(slugify "${GITHUB_REPOSITORY:-unknown}")"
+        job_slug="$(slugify "${GITHUB_WORKFLOW:-workflow}")__$(slugify "${GITHUB_JOB:-job}")"
+        repo_dir="${nas_dir}/${repo_slug}"
+        job_dir="${repo_dir}/${job_slug}"
+
+        snap="$(python3 - "$job_dir" "$repo_dir" <<'PY'
+        import glob, os, sys
+
+        job_dir, repo_dir = sys.argv[1], sys.argv[2]
+
+        def pick_latest(paths):
+            best_mtime = -1.0
+            best_path = ""
+            for p in paths:
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    continue
+                if st.st_size > 0 and (st.st_mtime, p) > (best_mtime, best_path):
+                    best_mtime = st.st_mtime
+                    best_path = p
+            return best_path
+
+        chosen = pick_latest(glob.glob(os.path.join(job_dir, "snap-*.tar.zst")))
+        if not chosen:
+            # Same-repo fallback only: cross-repo GOPATH/bin causes tool version clashes.
+            chosen = pick_latest(glob.glob(os.path.join(repo_dir, "*", "snap-*.tar.zst")))
+        if chosen:
+            print(chosen)
+        PY
+        )"
+
+        if [ -z "$snap" ]; then
+          mkdir -p "$cache_dir/go" "$cache_dir/go-mod" "$cache_dir/go-build"
+          echo "arc-cache-restore: cold start (${repo_slug}/${job_slug})"
+          exit 0
+        fi
+
+        echo "arc-cache-restore: restoring ${snap} -> ${cache_dir}"
+        reset_cache
+        zstd -dc "$snap" | tar --delay-directory-restore -xf - -C "$cache_dir"
+        mkdir -p "$cache_dir/go" "$cache_dir/go-mod" "$cache_dir/go-build"
+        EOF
+
+        cat > "${ARC_RUNNER_HOME}/arc-cache-save.sh" <<'EOF'
+        #!/usr/bin/env bash
+        set -eEuo pipefail
+
+        cache_dir="${ARC_RUNNER_HOME:-/home/runner}/.cache"
+        nas_dir="${ARC_NAS_CACHE_DIR:-/mnt/nas-cache/v1}"
+        tmp_file=""
+
+        on_err() {
+          local rc=$?
+          if [ -n "$tmp_file" ]; then
+            rm -f "$tmp_file" 2>/dev/null || true
+          fi
+          echo "::warning::arc-cache-save failed (exit ${rc}); continuing" >&2
+          exit 0
+        }
+        trap on_err ERR
+
+        slugify() {
+          local out
+          out="$(printf '%s' "$1" | LC_ALL=C tr -cs 'A-Za-z0-9._-' '_' | sed 's/^[._]*//;s/[._]*$//')"
+          printf '%s' "${out:-default}"
+        }
+
+        [ -d "$cache_dir" ] || exit 0
+        find "$cache_dir/go-mod/cache/download" -type f -name '*.tmp' -delete 2>/dev/null || true
+
+        total_bytes="$(python3 - "$cache_dir" <<'PY'
+        import os, sys
+
+        cache_dir = sys.argv[1]
+        KEEP_BUILD_FILES = {"README", "trim.txt"}
+        BUILD_CAP = 7500 * 1024 * 1024
+        ZIP_CAP = 1500 * 1024 * 1024
+
+        def prune_entries(entries, cap_bytes):
+            entries.sort(key=lambda item: item[0], reverse=True)
+            acc = 0
+            for _, size, path in entries:
+                acc += size
+                if acc > cap_bytes:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+
+        build_entries = []
+        go_build_root = os.path.join(cache_dir, "go-build")
+        for sub in ("go-build", "golangci-lint"):
+            root = os.path.join(cache_dir, sub)
+            if not os.path.isdir(root):
+                continue
+            for dirpath, _, filenames in os.walk(root):
+                for fn in filenames:
+                    p = os.path.join(dirpath, fn)
+                    if dirpath == go_build_root and fn in KEEP_BUILD_FILES:
+                        continue
+                    try:
+                        st = os.lstat(p)
+                    except OSError:
+                        continue
+                    if os.path.isfile(p) and not os.path.islink(p):
+                        build_entries.append((st.st_mtime, st.st_size, p))
+        prune_entries(build_entries, BUILD_CAP)
+
+        dl_root = os.path.join(cache_dir, "go-mod", "cache", "download")
+        if os.path.isdir(dl_root):
+            zip_entries = []
+            for dirpath, _, filenames in os.walk(dl_root):
+                for fn in filenames:
+                    if not fn.endswith(".zip"):
+                        continue
+                    p = os.path.join(dirpath, fn)
+                    try:
+                        st = os.lstat(p)
+                    except OSError:
+                        continue
+                    if os.path.isfile(p) and not os.path.islink(p):
+                        zip_entries.append((st.st_mtime, st.st_size, p))
+            prune_entries(zip_entries, ZIP_CAP)
+
+        total = 0
+        for dirpath, _, filenames in os.walk(cache_dir):
+            for fn in filenames:
+                p = os.path.join(dirpath, fn)
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if os.path.isfile(p) and not os.path.islink(p):
+                    total += st.st_size
+        print(total)
+        PY
+        )"
+
+        if [ "${total_bytes:-0}" -lt 1048576 ]; then
+          echo "arc-cache-save: cache under 1 MiB (${total_bytes:-0} B), skipping snapshot"
+          exit 0
+        fi
+
+        repo_slug="$(slugify "${GITHUB_REPOSITORY:-unknown}")"
+        job_slug="$(slugify "${GITHUB_WORKFLOW:-workflow}")__$(slugify "${GITHUB_JOB:-job}")"
+        host_slug="$(slugify "$(hostname 2>/dev/null || echo pod)")"
+        job_dir="${nas_dir}/${repo_slug}/${job_slug}"
+        mkdir -p "$job_dir"
+
+        epoch="$(date +%s)"
+        tmp_file="${job_dir}/.snap-${epoch}-${host_slug}-$$.tar.zst.tmp"
+        final_file="${job_dir}/snap-${epoch}-${host_slug}-$$.tar.zst"
+
+        tar -C "$cache_dir" --warning=no-file-changed -cf - . | zstd -1 -T0 -q -o "$tmp_file"
+        mv -f "$tmp_file" "$final_file"
+        tmp_file=""
+        echo "arc-cache-save: saved ${final_file}"
+
+        python3 - "$job_dir" <<'PY'
+        import os, sys, time
+
+        job_dir = sys.argv[1]
+        now = time.time()
+        snaps = []
+        try:
+            it = os.scandir(job_dir)
+        except OSError:
+            sys.exit(0)
+
+        with it:
+            for entry in it:
+                name = entry.name
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if name.endswith(".tmp"):
+                    if now - st.st_mtime > 3600:
+                        try:
+                            os.unlink(entry.path)
+                        except OSError:
+                            pass
+                elif name.startswith("snap-") and name.endswith(".tar.zst"):
+                    snaps.append((st.st_mtime, name, entry.path))
+
+        snaps.sort(reverse=True)
+        for mtime, _, path in snaps[2:]:
+            # Grace window prevents ESTALE while sibling pods stream an older snapshot.
+            if now - mtime > 1800:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        PY
+        EOF
+
+        chmod 0755 "${ARC_RUNNER_HOME}/arc-cache-restore.sh" "${ARC_RUNNER_HOME}/arc-cache-save.sh"
+        exec "${ARC_RUNNER_HOME}/run.sh"
+      env:
+      - name: ACTIONS_RUNNER_HOOK_JOB_STARTED
+        value: /home/runner/arc-cache-restore.sh
+      - name: ACTIONS_RUNNER_HOOK_JOB_COMPLETED
+        value: /home/runner/arc-cache-save.sh
+      - name: ARC_NAS_CACHE_DIR
+        value: /mnt/nas-cache/v1
       image: ghcr.io/atoz-project/arc-runner-golang:v2.0.0
       name: runner
       volumeMounts:
         - name: cache
-          mountPath: /home/runner/.cache
+          mountPath: /mnt/nas-cache
       # Guaranteed QoS (requests == limits) pins the 2C/4Gi ECI instance tier.
       resources:
         requests: { cpu: "2", memory: 4Gi }
         limits:   { cpu: "2", memory: 4Gi }
     volumes:
-      # No CSI driver or StorageClass exists in k8s-sg-dev, so mount the
-      # Capacity NAS directly via in-tree nfs (ap-southeast-1a, security-labs
-      # account, 071vdgqttek72nsstpz, owner=arc-runner-golang, root mode 1777).
+      # No CSI driver or StorageClass exists in k8s-sg-dev, so mount Capacity
+      # NAS at /mnt/nas-cache via in-tree nfs for tar.zst snapshot streaming.
       - name: cache
         nfs:
           server: 071vdgqttek72nsstpz-nnu91.ap-southeast-1.nas.aliyuncs.com
